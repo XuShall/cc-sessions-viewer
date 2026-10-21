@@ -1428,53 +1428,74 @@ fn activity_time_cache() -> &'static Mutex<FpCache<Option<u64>>> {
 }
 
 #[derive(Deserialize)]
-struct CodexActivityRecord<'a> {
-    #[serde(rename = "type", borrow)]
-    record_type: Option<&'a str>,
-    #[serde(borrow)]
-    timestamp: Option<&'a str>,
-    payload: Option<CodexActivityPayload<'a>>,
+struct CodexActivityRecord {
+    #[serde(rename = "type")]
+    record_type: Option<String>,
+    timestamp: Option<String>,
+    payload: Option<CodexActivityPayload>,
 }
 
 #[derive(Deserialize)]
-struct CodexActivityPayload<'a> {
-    #[serde(rename = "type", borrow)]
-    event_type: Option<&'a str>,
-    #[serde(borrow)]
-    message: Option<&'a str>,
+struct CodexActivityPayload {
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    role: Option<String>,
+    phase: Option<String>,
+    status: Option<String>,
+    // Owned text also accepts JSON escapes (newlines, quotes and Windows paths).
+    // A borrowed &str rejects those valid messages during deserialization.
+    message: Option<String>,
+    content: Option<Value>,
     images: Option<Vec<serde::de::IgnoredAny>>,
     local_images: Option<Vec<serde::de::IgnoredAny>>,
     text_elements: Option<Vec<serde::de::IgnoredAny>>,
     completed_at_ms: Option<u64>,
-    item: Option<CodexActivityItem<'a>>,
+    item: Option<CodexActivityItem>,
 }
 
 #[derive(Deserialize)]
-struct CodexActivityItem<'a> {
-    #[serde(rename = "type", borrow)]
-    item_type: Option<&'a str>,
-    content: Option<Vec<CodexActivityContent<'a>>>,
+struct CodexActivityItem {
+    #[serde(rename = "type")]
+    item_type: Option<String>,
+    phase: Option<String>,
+    text: Option<String>,
+    content: Option<Value>,
 }
 
-#[derive(Deserialize)]
-struct CodexActivityContent<'a> {
-    #[serde(rename = "type", borrow)]
-    block_type: Option<&'a str>,
-    #[serde(borrow)]
-    text: Option<&'a str>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexActivityKind {
+    Reply,
+    User,
 }
 
-impl CodexActivityRecord<'_> {
-    fn is_conversation_message(&self) -> bool {
-        if self.record_type != Some("event_msg") {
-            return false;
-        }
-        let Some(payload) = &self.payload else {
-            return false;
-        };
-        match payload.event_type {
-            Some("user_message") => {
-                payload.message.is_some_and(|text| !text.trim().is_empty())
+fn activity_text_present(text: Option<&str>) -> bool {
+    text.is_some_and(|text| !text.trim().is_empty())
+}
+
+fn activity_content_present(content: Option<&Value>) -> bool {
+    match content {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(blocks)) => blocks.iter().any(|block| {
+            matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("input_text" | "text" | "Text" | "output_text")
+            ) && activity_text_present(block.get("text").and_then(Value::as_str))
+        }),
+        _ => false,
+    }
+}
+
+// Older Codex versions omitted phase; their assistant messages remain supported.
+fn activity_final_phase(phase: Option<&str>) -> bool {
+    matches!(phase, None | Some("final_answer"))
+}
+
+impl CodexActivityRecord {
+    fn message_kind(&self) -> Option<CodexActivityKind> {
+        let payload = self.payload.as_ref()?;
+        match (self.record_type.as_deref(), payload.event_type.as_deref()) {
+            (Some("event_msg"), Some("user_message")) => {
+                (activity_text_present(payload.message.as_deref())
                     || payload
                         .images
                         .as_ref()
@@ -1486,44 +1507,57 @@ impl CodexActivityRecord<'_> {
                     || payload
                         .text_elements
                         .as_ref()
-                        .is_some_and(|items| !items.is_empty())
+                        .is_some_and(|items| !items.is_empty()))
+                .then_some(CodexActivityKind::User)
             }
-            Some("agent_message") => payload.message.is_some_and(|text| !text.trim().is_empty()),
-            Some("item_completed") => match payload.item.as_ref().and_then(|item| item.item_type) {
-                Some("UserMessage") => true,
-                Some("AgentMessage") => payload
-                    .item
-                    .as_ref()
-                    .and_then(|item| item.content.as_ref())
-                    .is_some_and(|blocks| {
-                        blocks.iter().any(|block| {
-                            matches!(
-                                block.block_type,
-                                Some("input_text" | "text" | "Text" | "output_text")
-                            ) && block.text.is_some_and(|text| !text.trim().is_empty())
-                        })
-                    }),
-                _ => false,
+            (Some("event_msg"), Some("agent_message")) => {
+                (activity_final_phase(payload.phase.as_deref())
+                    && activity_text_present(payload.message.as_deref()))
+                .then_some(CodexActivityKind::Reply)
+            }
+            (Some("event_msg"), Some("item_completed")) => {
+                let item = payload.item.as_ref()?;
+                match item.item_type.as_deref() {
+                    Some("UserMessage") => Some(CodexActivityKind::User),
+                    Some("AgentMessage") => {
+                        (activity_final_phase(item.phase.as_deref())
+                            && (activity_text_present(item.text.as_deref())
+                                || activity_content_present(item.content.as_ref())))
+                        .then_some(CodexActivityKind::Reply)
+                    }
+                    _ => None,
+                }
+            }
+            (Some("response_item"), Some("message")) => match payload.role.as_deref() {
+                Some("assistant") => {
+                    (activity_final_phase(payload.phase.as_deref())
+                        && matches!(payload.status.as_deref(), None | Some("completed"))
+                        && activity_content_present(payload.content.as_ref()))
+                    .then_some(CodexActivityKind::Reply)
+                }
+                Some("user") => Some(CodexActivityKind::User),
+                _ => None,
             },
-            _ => false,
+            _ => None,
         }
     }
 
     fn timestamp_ms(&self) -> Option<u64> {
-        self.timestamp
-            .and_then(parse_iso8601_ms)
-            .and_then(|timestamp| u64::try_from(timestamp).ok())
+        self.payload
+            .as_ref()
+            .and_then(|payload| payload.completed_at_ms)
             .or_else(|| {
-                self.payload
-                    .as_ref()
-                    .and_then(|payload| payload.completed_at_ms)
+                self.timestamp
+                    .as_deref()
+                    .and_then(parse_iso8601_ms)
+                    .and_then(|timestamp| u64::try_from(timestamp).ok())
             })
     }
 }
 
 /// Codex may append settings and lifecycle events when a thread is merely opened.
-/// Walk the append-only JSONL backwards and stop at the latest user/assistant message,
-/// so those non-conversation writes cannot change the session's displayed update time.
+/// Sort by the latest completed assistant reply, skipping commentary and later user
+/// input. A thread with no reply yet falls back to its latest user message.
 fn last_conversation_timestamp(fp: &Path) -> Option<u64> {
     const CHUNK_SIZE: usize = 64 * 1024;
 
@@ -1531,6 +1565,7 @@ fn last_conversation_timestamp(fp: &Path) -> Option<u64> {
     let mut remaining = file.seek(SeekFrom::End(0)).ok()?;
     let mut partial = Vec::new();
     let mut chunk = vec![0u8; CHUNK_SIZE];
+    let mut latest_user_time = None;
 
     while remaining > 0 {
         let start = remaining.saturating_sub(CHUNK_SIZE as u64);
@@ -1544,11 +1579,16 @@ fn last_conversation_timestamp(fp: &Path) -> Option<u64> {
 
         if start == 0 {
             for line in data.rsplit(|byte| *byte == b'\n') {
-                if let Some(timestamp) = conversation_line_timestamp(line) {
-                    return Some(timestamp);
+                if let Some((kind, timestamp)) = conversation_line_timestamp(line) {
+                    match kind {
+                        CodexActivityKind::Reply => return Some(timestamp),
+                        CodexActivityKind::User => {
+                            latest_user_time.get_or_insert(timestamp);
+                        }
+                    }
                 }
             }
-            return None;
+            return latest_user_time;
         }
 
         let Some(first_newline) = data.iter().position(|byte| *byte == b'\n') else {
@@ -1557,22 +1597,24 @@ fn last_conversation_timestamp(fp: &Path) -> Option<u64> {
             continue;
         };
         for line in data[first_newline + 1..].rsplit(|byte| *byte == b'\n') {
-            if let Some(timestamp) = conversation_line_timestamp(line) {
-                return Some(timestamp);
+            if let Some((kind, timestamp)) = conversation_line_timestamp(line) {
+                match kind {
+                    CodexActivityKind::Reply => return Some(timestamp),
+                    CodexActivityKind::User => {
+                        latest_user_time.get_or_insert(timestamp);
+                    }
+                }
             }
         }
         partial.extend_from_slice(&data[..first_newline]);
         remaining = start;
     }
-    None
+    latest_user_time
 }
 
-fn conversation_line_timestamp(line: &[u8]) -> Option<u64> {
-    let record: CodexActivityRecord<'_> = serde_json::from_slice(line).ok()?;
-    record
-        .is_conversation_message()
-        .then(|| record.timestamp_ms())
-        .flatten()
+fn conversation_line_timestamp(line: &[u8]) -> Option<(CodexActivityKind, u64)> {
+    let record: CodexActivityRecord = serde_json::from_slice(line).ok()?;
+    Some((record.message_kind()?, record.timestamp_ms()?))
 }
 
 fn activity_timestamp(fp: &Path, mtime: u64, size: u64, meta: &Meta) -> u64 {
@@ -3635,6 +3677,170 @@ Only after the original task is complete, process this follow-up in the order re
             writeln!(f, "{l}").unwrap();
         }
         p
+    }
+
+    #[test]
+    fn codex_reply_time_handles_escaped_text_and_ignores_settings() {
+        let p = write_temp(
+            "codex-reply-time-escaped.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-19T12:00:41.393Z","type":"session_meta","payload":{"id":"reply-time-escaped","cwd":"/tmp","timestamp":"2026-10-19T12:00:41.393Z"}}"#,
+                r#"{"timestamp":"2026-10-19T12:05:59.961Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Inspect C:\\repo\\main.rs\nthen explain it"}]}}}"#,
+                r#"{"timestamp":"2026-10-19T12:10:38.707Z","type":"event_msg","payload":{"type":"item_completed","completed_at_ms":1792411838702,"item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"Text","text":"Fixed \"sorting\".\nPath: C:\\repo\\main.rs"}]}}}"#,
+                r#"{"timestamp":"2026-10-20T05:43:09.157Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"example"}}}"#,
+                r#"{"timestamp":"2026-10-21T03:19:59.709Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}"#,
+            ],
+        );
+        assert_eq!(last_conversation_timestamp(&p), Some(1_792_411_838_702));
+        let meta = meta(&p).unwrap();
+        let size = fs::metadata(&p).unwrap().len();
+        assert_eq!(
+            activity_timestamp(&p, mtime_millis(&p), size, &meta),
+            1_792_411_838_702
+        );
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn codex_reply_time_skips_later_questions_commentary_and_tools() {
+        let p = write_temp(
+            "codex-reply-time-pending.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Previous answer"}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"A new question"}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:01Z","type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"Still checking..."}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:02Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"commentary","text":"Working..."}}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","status":"in_progress","content":"Partial reply"}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:04Z","type":"response_item","payload":{"type":"function_call_output","output":"done"}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:05Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+            ],
+        );
+        assert_eq!(
+            last_conversation_timestamp(&p),
+            Some(parse_iso8601_ms("2026-10-19T12:10:00Z").unwrap() as u64)
+        );
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn codex_reply_time_supports_legacy_and_response_item_messages() {
+        for (name, line) in [
+            (
+                "legacy",
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","message":"A legacy\nreply"}}"#,
+            ),
+            (
+                "response-blocks",
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"A \"quoted\" reply"}]}}"#,
+            ),
+            (
+                "response-string",
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":"A legacy string reply"}}"#,
+            ),
+            (
+                "completed-text",
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","text":"A reply\nwith a second line"}}}"#,
+            ),
+        ] {
+            let p = write_temp(&format!("codex-reply-time-{name}.jsonl"), &[line]);
+            assert_eq!(
+                last_conversation_timestamp(&p),
+                Some(parse_iso8601_ms("2026-10-19T12:10:00Z").unwrap() as u64),
+                "{name}"
+            );
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn codex_reply_time_advances_only_after_a_new_reply() {
+        let p = write_temp(
+            "codex-reply-time-appended.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-19T12:00:00Z","type":"session_meta","payload":{"id":"reply-time-appended","cwd":"/tmp","timestamp":"2026-10-19T12:00:00Z"}}"#,
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"First answer"}}"#,
+            ],
+        );
+        let meta = meta(&p).unwrap();
+        let read_time = || {
+            let md = fs::metadata(&p).unwrap();
+            activity_timestamp(&p, mtime_millis(&p), md.len(), &meta)
+        };
+        let first_time = read_time();
+        {
+            let mut file = fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(file, "{}", r#"{"timestamp":"2026-10-20T05:00:00Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}"#).unwrap();
+        }
+        assert_eq!(read_time(), first_time);
+        {
+            let mut file = fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(file, "{}", r#"{"timestamp":"2026-10-20T05:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Second\nanswer"}}"#).unwrap();
+        }
+        assert_eq!(
+            read_time(),
+            parse_iso8601_ms("2026-10-20T05:10:00Z").unwrap() as u64
+        );
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn codex_reply_time_falls_back_to_user_then_creation_time() {
+        let p = write_temp(
+            "codex-reply-time-no-answer.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-19T12:00:00Z","type":"session_meta","payload":{"id":"reply-time-no-answer","cwd":"/tmp","timestamp":"2026-10-19T12:00:00Z"}}"#,
+                r#"{"timestamp":"2026-10-19T12:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":"Question"}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"Working..."}}"#,
+            ],
+        );
+        assert_eq!(
+            last_conversation_timestamp(&p),
+            Some(parse_iso8601_ms("2026-10-19T12:01:00Z").unwrap() as u64)
+        );
+        fs::write(&p, r#"{"timestamp":"2026-10-20T05:00:00Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}"#).unwrap();
+        let meta = Meta {
+            id: "reply-time-empty".to_string(),
+            cwd: "/tmp".to_string(),
+            created: Some("2026-10-19T12:00:00Z".to_string()),
+        };
+        assert_eq!(
+            activity_timestamp(&p, 9_999_999_999_999, fs::metadata(&p).unwrap().len(), &meta),
+            parse_iso8601_ms("2026-10-19T12:00:00Z").unwrap() as u64
+        );
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn codex_reply_time_reads_across_chunks_and_incomplete_tail() {
+        let reply = r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Answer"}}"#;
+        let p = write_temp("codex-reply-time-chunks.jsonl", &[reply]);
+        let settings = json!({
+            "timestamp": "2026-10-20T05:00:00Z",
+            "type": "event_msg",
+            "payload": { "type": "thread_settings_applied", "padding": "x".repeat(70_000) }
+        });
+        {
+            let mut file = fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(file, "{settings}").unwrap();
+            write!(file, "{{\"timestamp\":\"2026-10-21").unwrap();
+        }
+        assert_eq!(
+            last_conversation_timestamp(&p),
+            Some(parse_iso8601_ms("2026-10-19T12:10:00Z").unwrap() as u64)
+        );
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn codex_reply_time_ignores_non_reply_roles_and_empty_replies() {
+        for line in [
+            r#"{"timestamp":"2026-10-19T12:10:00Z","type":"response_item","payload":{"type":"message","role":"developer","content":"Instructions"}}"#,
+            r#"{"timestamp":"2026-10-19T12:10:00Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":"Progress"}}"#,
+            r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"  \n  "}}"#,
+            r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","text":"Thoughts"}}}"#,
+        ] {
+            assert_eq!(conversation_line_timestamp(line.as_bytes()), None);
+        }
     }
 
     // ---- GUI chat（codex exec --json 实时事件流）协议解析 ----
