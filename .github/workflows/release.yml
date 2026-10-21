@@ -36,8 +36,8 @@ jobs:
         env:
           REQUESTED_TAG: ${{ inputs.tag }}
         run: |
-          $packageVersion = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
-          $tauriVersion = (Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $packageVersion = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json -AsHashtable).version
+          $tauriVersion = (Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json -AsHashtable).version
           if ($packageVersion -ne $tauriVersion) { throw 'Package and Tauri versions differ' }
           $releaseTag = "v$packageVersion"
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $releaseTag = $env:GITHUB_REF_NAME }
@@ -62,7 +62,7 @@ jobs:
       - name: Package installer, portable executable and checksums
         shell: pwsh
         run: |
-          $packageVersion = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          $packageVersion = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json -AsHashtable).version
           New-Item -ItemType Directory -Force -Path dist-release, dist-release/portable | Out-Null
           $binary = Get-ChildItem -LiteralPath src-tauri/target/release -File -Filter '*.exe' |
             Where-Object { $_.BaseName -in @('cc-sessions-viewer', 'Sessions Viewer') } |
