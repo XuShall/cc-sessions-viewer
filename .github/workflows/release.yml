@@ -72,7 +72,10 @@ jobs:
           Compress-Archive -LiteralPath 'dist-release/portable/Sessions Viewer.exe' -DestinationPath "dist-release/Sessions.Viewer_${packageVersion}_x64_portable.zip"
           $installers = Get-ChildItem -LiteralPath src-tauri/target/release/bundle/nsis -File -Filter '*-setup.exe'
           if (-not $installers) { throw 'Windows installer was not found' }
-          $installers | Copy-Item -Destination dist-release
+          foreach ($installer in $installers) {
+            $assetName = $installer.Name.Replace(' ', '.')
+            Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path dist-release $assetName)
+          }
           Get-ChildItem -LiteralPath dist-release -File | Sort-Object Name | ForEach-Object {
             $digest = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$digest  $($_.Name)"
