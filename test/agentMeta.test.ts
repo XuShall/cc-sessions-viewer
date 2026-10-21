@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { AGENT_META, agentLabel, agentSupports } from '../src/agentMeta'
+import { AGENT_META, agentLabel, agentSupports, sessionCanManageFile, sessionHistoryOnly } from '../src/agentMeta'
 
 describe('agent metadata', () => {
+  it('distinguishes readable projected Codex history from natively resumable rollouts', () => {
+    expect(sessionHistoryOnly('codex', 'codex://original-id')).toBe(true)
+    expect(sessionHistoryOnly('codex', '/sessions/rollout-id.jsonl.zst')).toBe(false)
+    expect(sessionHistoryOnly('codex', '/sessions/rollout-id.jsonl')).toBe(false)
+    expect(sessionHistoryOnly('pi', 'codex://not-a-codex-record')).toBe(false)
+    expect(sessionCanManageFile('codex', 'codex://original-id')).toBe(false)
+    expect(sessionCanManageFile('codex', '/sessions/rollout-id.jsonl.zst')).toBe(false)
+    expect(sessionCanManageFile('codex', '/sessions/rollout-id.jsonl')).toBe(true)
+    expect(sessionCanManageFile('agy', '/logs/transcript_full.jsonl')).toBe(true)
+  })
+
   it('defines Grok Build as history-capable but never GUI-chat-capable', () => {
     expect(agentLabel('grok')).toBe('Grok Build')
     expect(AGENT_META.grok.cliName).toBe('grok')

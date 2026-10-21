@@ -180,6 +180,9 @@ export default {
   'list.tb.exportSelected': '导出所选',
   'list.codex.internal': '审核会话',
   'list.codex.archived': '已归档会话',
+  'list.codex.historyOnly': '仅可查看历史',
+  'list.codex.historyOnlyHint': '原始 Codex 会话文件已缺失，仍可查看和导出历史，但无法继续会话。',
+  'list.codex.managedHistoryHint': '此压缩或数据库历史由 Codex 管理，请在 Codex 中重命名或删除。',
 
   'search.global.placeholder': '搜索 {agent} 会话',
   'search.global.placeholderId': '按 {agent} 会话 ID 搜索',

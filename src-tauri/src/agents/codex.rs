@@ -36,6 +36,9 @@ use crate::util::{
 
 pub struct CodexSource;
 
+#[path = "codex_storage.rs"]
+mod storage;
+
 const CODEX_APP_FIRST_PAGE_SIZE: usize = 50;
 const CODEX_APP_LIST_PAGE_SIZE: usize = 100;
 const CODEX_APP_LIST_MAX_THREADS: usize = 1_000;
@@ -43,35 +46,11 @@ const CODEX_APP_LIST_MAX_THREADS: usize = 1_000;
 /// 但取用方拿到的仍是旧快照——只有进程内第一次是阻塞的。
 const CODEX_APP_LIST_TTL: Duration = Duration::from_secs(30);
 
-fn sessions_dir() -> PathBuf {
-    home().join(".codex").join("sessions")
-}
-
-fn archived_sessions_dir() -> PathBuf {
-    home().join(".codex").join("archived_sessions")
-}
-
 /// 在 ~/.codex 下找编号最大的 state_<N>.sqlite —— codex 用版本号区分 schema，
 /// 升级时会写到新文件（state_4.sqlite → state_5.sqlite），picker 用最新的那个。
 /// 没找到时返回 None，调用方应静默跳过 sqlite 更新（codex 旧版本或从未运行）。
 fn find_state_db() -> Option<PathBuf> {
-    let dir = home().join(".codex");
-    let mut best: Option<(u64, PathBuf)> = None;
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            let n = name
-                .strip_prefix("state_")
-                .and_then(|s| s.strip_suffix(".sqlite"))
-                .and_then(|s| s.parse::<u64>().ok());
-            if let Some(n) = n {
-                if best.as_ref().map(|(b, _)| n > *b).unwrap_or(true) {
-                    best = Some((n, e.path()));
-                }
-            }
-        }
-    }
-    best.map(|(_, p)| p)
+    storage::newest_db(&storage::codex_home(), "state_")
 }
 
 #[derive(Clone)]
@@ -106,59 +85,6 @@ struct CodexThreadFlags {
     archived: bool,
 }
 
-#[derive(Debug, Default)]
-struct CodexThreadFlagsIndex {
-    by_id: HashMap<String, CodexThreadFlags>,
-    by_path: HashMap<String, CodexThreadFlags>,
-}
-
-fn is_archived_path(path: &Path) -> bool {
-    path.starts_with(archived_sessions_dir())
-}
-
-fn load_thread_flags_index() -> CodexThreadFlagsIndex {
-    let Some(db_path) = find_state_db() else {
-        return CodexThreadFlagsIndex::default();
-    };
-    let conn = match rusqlite::Connection::open(db_path) {
-        Ok(conn) => conn,
-        Err(_) => return CodexThreadFlagsIndex::default(),
-    };
-    let mut stmt = match conn.prepare(
-        "SELECT id, rollout_path, archived, has_user_event, source, thread_source, model FROM threads",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return CodexThreadFlagsIndex::default(),
-    };
-    let rows = match stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let rollout_path: String = row.get(1)?;
-        let archived: i64 = row.get(2)?;
-        let has_user_event: i64 = row.get(3)?;
-        let source: String = row.get(4).unwrap_or_default();
-        let thread_source: Option<String> = row.get(5).unwrap_or_default();
-        let model: Option<String> = row.get(6).unwrap_or_default();
-        let flags = thread_flags_from_fields(
-            archived != 0,
-            has_user_event,
-            &source,
-            thread_source.as_deref(),
-            model.as_deref(),
-        );
-        Ok((id, rollout_path, flags))
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return CodexThreadFlagsIndex::default(),
-    };
-    let mut index = CodexThreadFlagsIndex::default();
-    for row in rows.flatten() {
-        let (id, rollout_path, flags) = row;
-        index.by_path.insert(rollout_path, flags);
-        index.by_id.insert(id, flags);
-    }
-    index
-}
-
 fn thread_flags_from_fields(
     archived: bool,
     _has_user_event: i64,
@@ -173,20 +99,6 @@ fn thread_flags_from_fields(
         || source_lc.contains("guardian")
         || model_lc == "codex-auto-review";
     CodexThreadFlags { internal, archived }
-}
-
-fn flags_for(fp: &Path, meta: &Meta, index: &CodexThreadFlagsIndex) -> CodexThreadFlags {
-    let path = fp.to_string_lossy().to_string();
-    let mut flags = index
-        .by_id
-        .get(&meta.id)
-        .or_else(|| index.by_path.get(&path))
-        .copied()
-        .unwrap_or_default();
-    if is_archived_path(fp) {
-        flags.archived = true;
-    }
-    flags
 }
 
 fn include_by_flags(
@@ -214,25 +126,191 @@ impl Default for CodexAppListSnapshot {
     }
 }
 
-/// 递归收集 Codex rollout JSONL。默认只扫 ~/.codex/sessions；
-/// 用户显式打开“已归档会话”时再额外扫 ~/.codex/archived_sessions。
-fn all_files(include_archived: bool) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_jsonl(&sessions_dir(), &mut out);
+/// Discover raw/compressed rollouts plus projections whose legacy file was
+/// removed by Codex's migration. A metadata row alone is not readable history.
+#[derive(Clone)]
+struct SessionCandidate {
+    path: PathBuf,
+    meta: Meta,
+    flags: CodexThreadFlags,
+    modified: u64,
+    size: u64,
+    record: Option<storage::ThreadRecord>,
+    projected: bool,
+}
+
+fn iso_millis(value: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(value)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn discover_sessions_in(
+    root: &Path,
+    include_internal: bool,
+    include_archived: bool,
+) -> Result<Vec<SessionCandidate>, String> {
+    let records = storage::threads(root)?;
+    let by_id: HashMap<_, _> = records
+        .iter()
+        .map(|record| (record.id.as_str(), record))
+        .collect();
+    let history = storage::history_connection(root)?;
+    let projected = history
+        .as_ref()
+        .map(storage::history_ids)
+        .transpose()?
+        .unwrap_or_default();
+    let mut files = Vec::new();
+    collect_jsonl(&root.join("sessions"), &mut files);
     if include_archived {
-        collect_jsonl(&archived_sessions_dir(), &mut out);
+        collect_jsonl(&root.join("archived_sessions"), &mut files);
     }
-    out
+    // A raw file and its .zst backup must not become two sessions. Raw wins.
+    files.sort();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for path in files {
+        let Ok(md) = fs::metadata(&path) else {
+            continue;
+        };
+        let mt = mtime_millis(&path);
+        let Some(meta) = meta_cached(&path, mt, md.len()) else {
+            continue;
+        };
+        let record = by_id.get(meta.id.as_str()).copied();
+        let mut flags = record
+            .map(|record| {
+                thread_flags_from_fields(
+                    record.archived,
+                    0,
+                    &record.source,
+                    record.thread_source.as_deref(),
+                    record.model.as_deref(),
+                )
+            })
+            .unwrap_or_default();
+        flags.archived |= path.starts_with(root.join("archived_sessions"));
+        if !include_by_flags(flags, include_internal, include_archived) {
+            continue;
+        }
+        let key = if meta.id.is_empty() {
+            path.to_string_lossy().into_owned()
+        } else {
+            meta.id.clone()
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        let modified = if storage::is_compressed(&path) {
+            record
+                .map(|r| r.updated_ms)
+                .filter(|t| *t > 0)
+                .unwrap_or(mt)
+        } else {
+            activity_timestamp(&path, mt, md.len(), &meta)
+        };
+        let has_projection = projected.contains(&meta.id);
+        out.push(SessionCandidate {
+            path,
+            meta,
+            flags,
+            modified,
+            size: md.len(),
+            record: record.cloned(),
+            projected: has_projection,
+        });
+    }
+    for record in &records {
+        if seen.contains(&record.id) || !projected.contains(&record.id) {
+            continue;
+        }
+        let flags = thread_flags_from_fields(
+            record.archived,
+            0,
+            &record.source,
+            record.thread_source.as_deref(),
+            record.model.as_deref(),
+        );
+        if !include_by_flags(flags, include_internal, include_archived) {
+            continue;
+        }
+        out.push(SessionCandidate {
+            path: PathBuf::from(format!("{}{}", storage::VPATH_PREFIX, record.id)),
+            meta: Meta {
+                id: record.id.clone(),
+                cwd: record.cwd.clone(),
+                created: iso_millis(record.created_ms),
+            },
+            flags,
+            modified: record.updated_ms,
+            size: 0,
+            record: Some(record.clone()),
+            projected: true,
+        });
+    }
+    Ok(out)
+}
+
+fn indexed_session(
+    candidate: &SessionCandidate,
+    titles: &HashMap<String, TitleIndexEntry>,
+    history: &rusqlite::Connection,
+) -> Result<SessionMeta, String> {
+    let record = candidate
+        .record
+        .as_ref()
+        .ok_or("Codex indexed metadata missing")?;
+    let summary = storage::history_summary(history, &record.id)?;
+    Ok(SessionMeta {
+        id: record.id.clone(),
+        file_name: candidate
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        path: candidate.path.to_string_lossy().into_owned(),
+        title: titles
+            .get(&record.id)
+            .map(|title| title.name.clone())
+            .unwrap_or_else(|| {
+                if record.title.trim().is_empty() {
+                    "(untitled session)".into()
+                } else {
+                    record.title.clone()
+                }
+            }),
+        cwd: Some(candidate.meta.cwd.clone()),
+        created: candidate.meta.created.clone(),
+        modified: candidate.modified,
+        size: if candidate.size == 0 {
+            summary.size
+        } else {
+            candidate.size
+        },
+        message_count: summary.message_count,
+        pi_branch_count: None,
+        pi_entry_count: None,
+        codex_app_list_rank: None,
+        codex_app_list_scanned: 0,
+        codex_app_first_page_size: CODEX_APP_FIRST_PAGE_SIZE,
+        codex_app_first_page_position: 0,
+        codex_internal: candidate.flags.internal,
+        codex_archived: candidate.flags.archived,
+    })
 }
 
 fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
-    if let Ok(rd) = fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                collect_jsonl(&p, out);
-            } else if is_jsonl(&p) {
-                out.push(p);
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                collect_jsonl(&path, out);
+            } else if kind.is_file() && (is_jsonl(&path) || storage::is_compressed(&path)) {
+                out.push(path);
             }
         }
     }
@@ -500,7 +578,7 @@ fn apply_codex_app_list_snapshot(sessions: &mut [SessionMeta], snapshot: &CodexA
 
 /// 读取首行 session_meta，得到 id / cwd / 创建时间。
 fn meta(path: &Path) -> Option<Meta> {
-    let file = fs::File::open(path).ok()?;
+    let file = storage::open_rollout(path).ok()?;
     let mut first = String::new();
     BufReader::new(file).read_line(&mut first).ok()?;
     let v: Value = serde_json::from_str(first.trim()).ok()?;
@@ -528,9 +606,9 @@ fn meta(path: &Path) -> Option<Meta> {
 
 /// 读取 `~/.codex/session_index.jsonl`，返回 thread_id → 最新 thread_name。
 /// 文件不存在 / 不可读时返回空 map，调用方自动回落到旧的 JSONL 内联策略。
-fn load_title_index() -> HashMap<String, TitleIndexEntry> {
+fn load_title_index_in(root: &Path) -> HashMap<String, TitleIndexEntry> {
     let mut map: HashMap<String, TitleIndexEntry> = HashMap::new();
-    let path = home().join(".codex").join("session_index.jsonl");
+    let path = root.join("session_index.jsonl");
     let file = match fs::File::open(&path) {
         Ok(f) => f,
         Err(_) => return map,
@@ -566,7 +644,7 @@ fn load_title_index() -> HashMap<String, TitleIndexEntry> {
 
 /// 取首条用户输入作为标题（用于回收站展示）。
 fn first_user_text(fp: &Path) -> String {
-    if let Ok(file) = fs::File::open(fp) {
+    if let Ok(file) = storage::open_rollout(fp) {
         for line in BufReader::new(file).lines().map_while(Result::ok) {
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
                 if let Some(text) = codex_user_text(&v) {
@@ -1388,7 +1466,12 @@ impl<V: Clone> FpCache<V> {
         self.next_seq += 1;
         self.entries.insert(
             fp.to_path_buf(),
-            FpEntry { mtime, size, seq, value },
+            FpEntry {
+                mtime,
+                size,
+                seq,
+                value,
+            },
         );
         if self.entries.len() <= max {
             return;
@@ -1525,6 +1608,14 @@ impl CodexActivityRecord<'_> {
 /// Walk the append-only JSONL backwards and stop at the latest user/assistant message,
 /// so those non-conversation writes cannot change the session's displayed update time.
 fn last_conversation_timestamp(fp: &Path) -> Option<u64> {
+    if storage::rollout_path(fp).is_some_and(|path| storage::is_compressed(&path)) {
+        let reader = storage::open_rollout(fp).ok()?;
+        return reader
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| conversation_line_timestamp(line.as_bytes()))
+            .last();
+    }
     const CHUNK_SIZE: usize = 64 * 1024;
 
     let mut file = fs::File::open(fp).ok()?;
@@ -1617,7 +1708,11 @@ pub fn scan_cache_entries() -> usize {
 /// 带缓存的首行 `session_meta`。列表要靠它判断「这个文件属于哪个项目」，
 /// 而这是唯一需要遍历全盘文件的地方 —— 缓存住它，那 257ms 的固定地板就没了。
 fn meta_cached(fp: &Path, mtime: u64, size: u64) -> Option<Meta> {
-    if let Some(hit) = meta_cache().lock().ok().and_then(|c| c.get(fp, mtime, size)) {
+    if let Some(hit) = meta_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(fp, mtime, size))
+    {
         return Some(hit);
     }
     let m = meta(fp)?;
@@ -1650,7 +1745,7 @@ fn scan_body_uncached(fp: &Path) -> ScanBody {
     let mut completed_agent_message_count = 0usize;
     let mut completed_user_message_ids = HashSet::new();
     let mut response_user_messages: Vec<String> = Vec::new();
-    if let Ok(file) = fs::File::open(fp) {
+    if let Ok(file) = storage::open_rollout(fp) {
         for line in BufReader::new(file).lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
@@ -1764,7 +1859,11 @@ fn scan_body_uncached(fp: &Path) -> ScanBody {
 }
 
 fn scan_body(fp: &Path, mtime: u64, size: u64) -> ScanBody {
-    if let Some(hit) = scan_body_cache().lock().ok().and_then(|c| c.get(fp, mtime, size)) {
+    if let Some(hit) = scan_body_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(fp, mtime, size))
+    {
         return hit;
     }
     let body = scan_body_uncached(fp);
@@ -1796,7 +1895,10 @@ fn scan(
         first_user_title,
     } = scan_body(fp, modified, size);
     let id = if m.id.is_empty() {
-        file_name.trim_end_matches(".jsonl").to_string()
+        file_name
+            .trim_end_matches(".zst")
+            .trim_end_matches(".jsonl")
+            .to_string()
     } else {
         m.id.clone()
     };
@@ -1849,7 +1951,8 @@ fn read_with_title_index(
     path: &str,
     title_index: &HashMap<String, TitleIndexEntry>,
 ) -> Result<Vec<Msg>, String> {
-    let file = fs::File::open(path).map_err(|e| format!("Failed to open session: {e}"))?;
+    let file = storage::open_rollout(Path::new(path))
+        .map_err(|e| format!("Failed to open session: {e}"))?;
     let mut msgs = Vec::new();
     let mut pending_user_images: Vec<Block> = Vec::new();
     let mut tool_input_paths: HashMap<String, String> = HashMap::new();
@@ -1860,7 +1963,8 @@ fn read_with_title_index(
     let mut first_user_title = String::new();
     let mut saw_explicit_rename = false;
     let mut model_hint: Option<String> = None;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|e| format!("Failed to decode Codex session: {e}"))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -2302,8 +2406,36 @@ fn read_with_title_index(
 }
 
 fn read(path: &str) -> Result<Vec<Msg>, String> {
-    let title_index = load_title_index();
+    read_in(&storage::codex_home(), path)
+}
+
+fn read_in(root: &Path, path: &str) -> Result<Vec<Msg>, String> {
+    if path.starts_with(storage::VPATH_PREFIX) {
+        return storage::read_history(root, storage::virtual_id(path)?);
+    }
+    if storage::rollout_path(Path::new(path)).is_none() {
+        if let Some(record) = storage::thread_for_path(root, path)? {
+            return storage::read_history(root, &record.id);
+        }
+    }
+    let title_index = load_title_index_in(root);
     read_with_title_index(path, &title_index)
+}
+
+fn contains_user_text_in(root: &Path, path: &str, query: &str) -> bool {
+    read_in(root, path)
+        .map(|mut messages| {
+            post_process_codex_session_msgs(&mut messages);
+            messages.iter().any(|msg| {
+                msg.role == "user"
+                    && msg
+                        .blocks
+                        .iter()
+                        .filter_map(|block| block.text.as_deref())
+                        .any(|text| text.to_lowercase().contains(query))
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn post_process_codex_session_msgs(msgs: &mut [Msg]) {
@@ -2528,6 +2660,59 @@ pub(crate) fn parse_chat_line(line: &str) -> ChatEvent {
     }
 }
 
+fn session_page_in(
+    root: &Path,
+    project_key: &str,
+    offset: usize,
+    limit: usize,
+    include_internal: bool,
+    include_archived: bool,
+) -> Result<SessionPage, String> {
+    let mut matched: Vec<_> = discover_sessions_in(root, include_internal, include_archived)?
+        .into_iter()
+        .filter(|candidate| candidate.meta.cwd == project_key)
+        .collect();
+    matched.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.meta.id.cmp(&b.meta.id))
+    });
+    let total = matched.len();
+    let titles = load_title_index_in(root);
+    let history = storage::history_connection(root)?;
+    let sessions = matched
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|candidate| {
+            if candidate.projected
+                && candidate.record.is_some()
+                && (storage::is_compressed(&candidate.path)
+                    || candidate
+                        .path
+                        .to_string_lossy()
+                        .starts_with(storage::VPATH_PREFIX))
+            {
+                return indexed_session(
+                    candidate,
+                    &titles,
+                    history.as_ref().ok_or("Codex history database missing")?,
+                );
+            }
+            let mt = mtime_millis(&candidate.path);
+            Ok(scan(
+                &candidate.path,
+                &candidate.meta,
+                &titles,
+                mt,
+                candidate.modified,
+                candidate.flags,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(SessionPage { total, sessions })
+}
+
 impl SessionSource for CodexSource {
     fn name(&self) -> &'static str {
         "codex"
@@ -2538,40 +2723,29 @@ impl SessionSource for CodexSource {
         include_codex_internal: bool,
         include_codex_archived: bool,
     ) -> Result<Vec<ProjectInfo>, String> {
-        let mut map: HashMap<String, (usize, u64)> = HashMap::new();
-        let flags_index = load_thread_flags_index();
-        for fp in all_files(include_codex_archived) {
-            if let Some(m) = meta(&fp) {
-                let flags = flags_for(&fp, &m, &flags_index);
-                if !include_by_flags(flags, include_codex_internal, include_codex_archived) {
-                    continue;
-                }
-                let mt = mtime_millis(&fp);
-                let entry = map.entry(m.cwd).or_insert((0, 0));
-                entry.0 += 1;
-                if mt > entry.1 {
-                    entry.1 = mt;
-                }
-            }
+        let mut projects: HashMap<String, ProjectInfo> = HashMap::new();
+        for candidate in discover_sessions_in(
+            &storage::codex_home(),
+            include_codex_internal,
+            include_codex_archived,
+        )? {
+            let cwd = &candidate.meta.cwd;
+            let project = projects.entry(cwd.clone()).or_insert_with(|| ProjectInfo {
+                dir_name: cwd.clone(),
+                display_path: cwd.clone(),
+                session_count: 0,
+                last_modified: 0,
+                exists: Path::new(cwd).is_dir(),
+                bookmarked: false,
+                parent_dir_name: None,
+                worktree_name: None,
+            });
+            project.session_count += 1;
+            project.last_modified = project.last_modified.max(candidate.modified);
         }
-        let mut out: Vec<ProjectInfo> = map
-            .into_iter()
-            .map(|(cwd, (count, last))| {
-                let exists = Path::new(&cwd).is_dir();
-                ProjectInfo {
-                    dir_name: cwd.clone(),
-                    display_path: cwd,
-                    session_count: count,
-                    last_modified: last,
-                    exists,
-                    bookmarked: false,
-                    parent_dir_name: None,
-                    worktree_name: None,
-                }
-            })
-            .collect();
-        out.sort_by_key(|p| std::cmp::Reverse(p.last_modified));
-        Ok(out)
+        let mut projects: Vec<_> = projects.into_values().collect();
+        projects.sort_by_key(|project| std::cmp::Reverse(project.last_modified));
+        Ok(projects)
     }
 
     fn list_sessions(
@@ -2582,51 +2756,17 @@ impl SessionSource for CodexSource {
         include_codex_internal: bool,
         include_codex_archived: bool,
     ) -> Result<SessionPage, String> {
-        // 廉价阶段：拿每个文件的首行 session_meta，筛出本项目的文件并取修改时间。
-        //
-        // 这一段是**唯一**要遍历全盘文件的地方：为了知道「这个文件属于哪个项目」，
-        // 列任何项目都得把所有 rollout 过一遍。原来是逐个开文件读首行，于是列一个
-        // 只有 1 个会话的项目也要 257ms。现在一次 metadata 拿到指纹的两半，命中缓存
-        // 就完全不碰文件内容 —— 顺带还省掉了原先单独再 stat 一次取 mtime。
-        let mut matched: Vec<(PathBuf, Meta, u64, u64, CodexThreadFlags)> = Vec::new();
-        let flags_index = load_thread_flags_index();
-        for fp in all_files(include_codex_archived) {
-            let Ok(md) = fs::metadata(&fp) else {
-                continue;
-            };
-            let size = md.len();
-            let mt = md
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let Some(m) = meta_cached(&fp, mt, size) else {
-                continue;
-            };
-            if m.cwd != project_key {
-                continue;
-            }
-            let flags = flags_for(&fp, &m, &flags_index);
-            if !include_by_flags(flags, include_codex_internal, include_codex_archived) {
-                continue;
-            }
-            let activity_time = activity_timestamp(&fp, mt, size, &m);
-            matched.push((fp, m, mt, activity_time, flags));
-        }
-        matched.sort_by_key(|m| std::cmp::Reverse(m.3));
-        let total = matched.len();
-        // Codex 把会话标题缓存在 ~/.codex/session_index.jsonl（append-only，同 id
-        // 多条时最新一条胜出）。列表整页加载一次即可，避免每个会话都重读一次文件。
-        let title_index = load_title_index();
-        let mut sessions: Vec<SessionMeta> = matched
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .map(|(p, m, mt, activity_time, flags)| {
-                scan(p, m, &title_index, *mt, *activity_time, *flags)
-            })
-            .collect();
+        let SessionPage {
+            total,
+            mut sessions,
+        } = session_page_in(
+            &storage::codex_home(),
+            project_key,
+            offset,
+            limit,
+            include_codex_internal,
+            include_codex_archived,
+        )?;
         if limit != usize::MAX {
             let snapshot = cached_codex_app_thread_list();
             apply_codex_app_list_snapshot(&mut sessions, &snapshot);
@@ -2641,6 +2781,7 @@ impl SessionSource for CodexSource {
     }
 
     fn rename_session(&self, path: &Path, name: &str) -> Result<(), String> {
+        self.validate_session_path(path)?;
         let trimmed = validate_rename_name(name)?;
         let filename_id = path
             .file_name()
@@ -2701,7 +2842,7 @@ impl SessionSource for CodexSource {
         })
         .to_string();
 
-        let idx_path = home().join(".codex").join("session_index.jsonl");
+        let idx_path = storage::codex_home().join("session_index.jsonl");
         let mut retained: Vec<String> = Vec::new();
         if idx_path.exists() {
             if let Ok(file) = fs::File::open(&idx_path) {
@@ -2764,6 +2905,10 @@ impl SessionSource for CodexSource {
         first_user_text(path)
     }
 
+    fn validate_resume(&self, session_id: &str, path: &str) -> Result<(), String> {
+        storage::validate_resume(&storage::codex_home(), session_id, path)
+    }
+
     fn resume_command(&self, session_id: &str, _path: &str) -> AgentCommand {
         AgentCommand::new("codex").arg("resume").arg(session_id)
     }
@@ -2777,15 +2922,82 @@ impl SessionSource for CodexSource {
     }
 
     fn usage_summary(&self, path: &str) -> Result<UsageSummary, String> {
+        // Projected items do not contain API token accounting. Do not fabricate
+        // an input/output breakdown from threads.tokens_used.
+        if path.starts_with(storage::VPATH_PREFIX) {
+            return Ok(UsageSummary::default());
+        }
         usage_summary(Path::new(path))
     }
 
     fn last_prompt(&self, path: &str) -> Result<Option<String>, String> {
+        if path.starts_with(storage::VPATH_PREFIX) {
+            return Ok(self
+                .read_session(path)?
+                .iter()
+                .rev()
+                .find(|msg| msg.role == "user")
+                .map(|msg| {
+                    crate::util::truncate_subtitle(
+                        &msg.blocks
+                            .iter()
+                            .filter_map(|b| b.text.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                }));
+        }
         Ok(last_user_text(Path::new(path)))
     }
 
     fn read_turns(&self, path: &str) -> Result<Vec<Turn>, String> {
+        if path.starts_with(storage::VPATH_PREFIX) {
+            return Ok(Vec::new());
+        }
         Ok(read_turns(Path::new(path)))
+    }
+
+    fn contains_text(&self, path: &str, query: &str) -> bool {
+        contains_user_text_in(&storage::codex_home(), path, query)
+    }
+
+    fn source_mtime(&self, path: &str) -> u64 {
+        storage::source_revision(&storage::codex_home(), path)
+    }
+
+    fn watch_targets(&self, path: &str) -> Vec<PathBuf> {
+        storage::watch_targets(&storage::codex_home(), path)
+    }
+
+    fn metadata_fingerprint(&self, path: &str) -> Option<String> {
+        storage::thread_for_path(&storage::codex_home(), path)
+            .ok()
+            .flatten()
+            .map(|row| row.title)
+    }
+
+    fn validate_session_path(&self, path: &Path) -> Result<(), String> {
+        if storage::is_compressed(path) || path.to_string_lossy().starts_with(storage::VPATH_PREFIX)
+        {
+            return Err(
+                "Compressed/paginated Codex history is read-only here; manage it with Codex".into(),
+            );
+        }
+        if !path.is_file() || !is_jsonl(path) {
+            return Err("Codex JSONL session file not found".into());
+        }
+        Ok(())
+    }
+
+    fn session_storage_unit(&self, path: &Path) -> Result<super::SessionStorageUnit, String> {
+        self.validate_session_path(path)?;
+        let root = storage::codex_home();
+        storage::validate_file_delete(&root, path)?;
+        Ok(super::SessionStorageUnit {
+            root_path: path.to_path_buf(),
+            entry_relative_path: PathBuf::new(),
+            kind: super::SessionStorageKind::File,
+        })
     }
 
     fn chat_slash_commands(&self, cwd: &str) -> Vec<crate::types::SlashCommand> {
@@ -2816,7 +3028,7 @@ impl SessionSource for CodexSource {
         );
 
         // 用户级 skills: ~/.codex/skills/ 和 ~/.agents/skills/
-        let user_codex = home().join(".codex").join("skills");
+        let user_codex = storage::codex_home().join("skills");
         super::claude::scan_skills_dir(&user_codex, "user", None, None, &mut out, &mut seen);
         let user_agents = home().join(".agents").join("skills");
         super::claude::scan_skills_dir(&user_agents, "user", None, None, &mut out, &mut seen);
@@ -2901,9 +3113,26 @@ impl SessionSource for CodexSource {
 //     和 `total_token_usage`（自 session 开始累积）。优先取 last_*；老格式没 last_* 时
 //     从 total_* 相对前一帧的差值还原。两个连续帧 total_tokens 相同 → 重复事件，跳过。
 fn last_user_text(fp: &Path) -> Option<String> {
+    let actual = storage::rollout_path(fp)?;
+    if storage::is_compressed(&actual) {
+        return storage::open_rollout(&actual)
+            .ok()?
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| {
+                let value = serde_json::from_str::<Value>(&line).ok()?;
+                let text = codex_user_text(&value)?;
+                if is_codex_internal_user_text(&text) {
+                    return None;
+                }
+                let clean = crate::util::truncate_subtitle(&codex_subtitle_body(&text));
+                (!clean.is_empty()).then_some(clean)
+            })
+            .last();
+    }
     // 分块反向扫描：峰值内存 = 一个 1 MB 块，而不是整个 rollout（本机最大 160 MB）。
     // 命中即停，绝大多数会话只会真正读到尾部一小段。
-    crate::util::scan_lines_backwards(fp, |line| {
+    crate::util::scan_lines_backwards(&actual, |line| {
         let v: Value = serde_json::from_slice(line).ok()?;
         let text = codex_user_text(&v)?;
         if is_codex_internal_user_text(&text) {
@@ -2915,7 +3144,7 @@ fn last_user_text(fp: &Path) -> Option<String> {
 }
 
 fn read_turns(fp: &Path) -> Vec<Turn> {
-    let file = match fs::File::open(fp) {
+    let file = match storage::open_rollout(fp) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
@@ -3158,7 +3387,7 @@ fn push_call(
 ///
 /// 早期写入时 `info` 可能为 null（订阅尚未拿到 usage），跳过；后续的覆盖前面的。
 fn usage_summary(fp: &Path) -> Result<UsageSummary, String> {
-    let file = match fs::File::open(fp) {
+    let file = match storage::open_rollout(fp) {
         Ok(f) => f,
         Err(_) => return Ok(UsageSummary::default()),
     };
@@ -4405,4 +4634,3 @@ fn gui_chat_uses_codex_app_server_process_model() {
     );
     assert_eq!(ChatProcessModel::CodexAppServer.as_str(), "codexAppServer");
 }
-

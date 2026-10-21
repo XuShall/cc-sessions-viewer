@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -62,49 +63,63 @@ fn is_uuid_dir(name: &str) -> bool {
 /// `from_ide` = true 表示来自 IDE（不支持 CLI resume）。
 /// 同一 UUID 若同时出现在 CLI 和 IDE，CLI 优先（先入 seen set）。
 fn all_conversations() -> Vec<(String, PathBuf, bool)> {
-    let cli_brain = cli_data_dir().join("brain");
-    let ide_brain = ide_data_dir().join("brain");
-    let sources: Vec<(PathBuf, bool)> = vec![(cli_brain, false), (ide_brain, true)];
+    conversations_in(&[
+        (cli_data_dir().join("brain"), false),
+        (ide_data_dir().join("brain"), true),
+    ])
+}
+
+fn conversations_in(sources: &[(PathBuf, bool)]) -> Vec<(String, PathBuf, bool)> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (bd, from_ide) in sources {
-        if !bd.is_dir() {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&bd) else {
+    for (brain, from_ide) in sources {
+        let Ok(entries) = fs::read_dir(brain) else {
             continue;
         };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !is_uuid_dir(&name) || !seen.insert(name.clone()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_uuid_dir(&name) || seen.contains(&name) {
                 continue;
             }
-            let transcript = e
-                .path()
-                .join(".system_generated")
-                .join("logs")
-                .join("transcript.jsonl");
-            if transcript.exists() {
-                out.push((name, transcript, from_ide));
-            }
+            let logs = entry.path().join(".system_generated").join("logs");
+            let transcript = logs.join("transcript.jsonl");
+            let full = logs.join("transcript_full.jsonl");
+            let path = if transcript.is_file() {
+                transcript
+            } else if full.is_file() {
+                full
+            } else {
+                continue;
+            };
+            // A CLI directory without a readable transcript must not shadow a
+            // valid IDE copy with the same UUID.
+            seen.insert(name.clone());
+            out.push((name, path, *from_ide));
         }
     }
     out
 }
 
-/// 给定一个 transcript.jsonl 路径，返回内容更完整的那个文件：
-/// agy 的 CHECKPOINT 机制会重写 transcript_full.jsonl（截断早期历史），
-/// 导致 transcript.jsonl 有时反而保留了更多消息。选文件更大的那个。
-fn preferred_transcript(transcript_path: &Path) -> PathBuf {
-    let full = transcript_path.with_file_name("transcript_full.jsonl");
-    if !full.exists() {
-        return transcript_path.to_path_buf();
+/// Either file may be the discovery entry. Select the fuller existing sibling
+/// even if a full-only session later gains a new rolling transcript.
+fn preferred_transcript(path: &Path) -> PathBuf {
+    let normal = path.with_file_name("transcript.jsonl");
+    let full = path.with_file_name("transcript_full.jsonl");
+    if !normal.is_file() {
+        return if full.is_file() {
+            full
+        } else {
+            path.to_path_buf()
+        };
     }
-    let size_of = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    if size_of(&full) >= size_of(transcript_path) {
+    if !full.is_file() {
+        return normal;
+    }
+    let size = |p: &Path| fs::metadata(p).map(|md| md.len()).unwrap_or(0);
+    if size(&full) >= size(&normal) {
         full
     } else {
-        transcript_path.to_path_buf()
+        normal
     }
 }
 
@@ -723,7 +738,7 @@ fn read(path: &str) -> Result<Vec<Msg>, String> {
 // ── read_turns（统计用） ──
 
 fn last_user_text(fp: &Path) -> Option<String> {
-    let raw = fs::read(fp).ok()?;
+    let raw = fs::read(preferred_transcript(fp)).ok()?;
     for line in raw.rsplit(|&b| b == b'\n') {
         if line.is_empty() {
             continue;
@@ -889,7 +904,7 @@ impl SessionSource for AgySource {
             if workspace == home_str {
                 workspace = "outside-of-project".to_string();
             }
-            let mt = mtime_millis(&transcript_path);
+            let mt = mtime_millis(&preferred_transcript(&transcript_path));
             let entry = map.entry(workspace).or_insert((0, 0));
             entry.0 += 1;
             if mt > entry.1 {
@@ -947,7 +962,7 @@ impl SessionSource for AgySource {
                 workspace = "outside-of-project".to_string();
             }
             if workspace == project_key {
-                let mt = mtime_millis(&transcript_path);
+                let mt = mtime_millis(&preferred_transcript(&transcript_path));
                 matched.push((conv_id, transcript_path, mt, from_ide));
             }
         }
@@ -962,8 +977,8 @@ impl SessionSource for AgySource {
                 let read_path = preferred_transcript(tp);
                 let title = extract_title(&read_path);
                 let message_count = count_user_messages(&read_path);
-                let mt = mtime_millis(tp);
-                let size = fs::metadata(tp).map(|m| m.len()).unwrap_or(0);
+                let mt = mtime_millis(&read_path);
+                let size = fs::metadata(&read_path).map(|m| m.len()).unwrap_or(0);
                 let cwd = if *from_ide {
                     Some("ide://antigravity-chat".to_string())
                 } else if project_key == "outside-of-project" {
@@ -1009,10 +1024,13 @@ impl SessionSource for AgySource {
     fn rename_session(&self, path: &Path, name: &str) -> Result<(), String> {
         let trimmed = validate_rename_name(name)?;
         let marker_line = format!("{RENAME_MARKER}{trimmed}");
-        append_jsonl_line(path, &marker_line)?;
-        let full = path.with_file_name("transcript_full.jsonl");
-        if full.exists() {
-            append_jsonl_line(&full, &marker_line)?;
+        let paths = std::collections::HashSet::from([
+            path.to_path_buf(),
+            path.with_file_name("transcript.jsonl"),
+            path.with_file_name("transcript_full.jsonl"),
+        ]);
+        for target in paths.into_iter().filter(|target| target.is_file()) {
+            append_jsonl_line(&target, &marker_line)?;
         }
         Ok(())
     }
@@ -1025,6 +1043,33 @@ impl SessionSource for AgySource {
     fn watch_target(&self, path: &str) -> Option<PathBuf> {
         // CHECKPOINT 会整文件重写 transcript_full；tail 盯内容更全的那个。
         Some(preferred_transcript(Path::new(path)))
+    }
+
+    fn source_mtime(&self, path: &str) -> u64 {
+        let path = Path::new(path);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for file in [
+            path.to_path_buf(),
+            path.with_file_name("transcript.jsonl"),
+            path.with_file_name("transcript_full.jsonl"),
+        ] {
+            file.hash(&mut hash);
+            if let Ok(md) = fs::metadata(file) {
+                md.len().hash(&mut hash);
+                md.modified().ok().hash(&mut hash);
+            }
+        }
+        hash.finish()
+    }
+
+    fn contains_text(&self, path: &str, query: &str) -> bool {
+        fs::read(preferred_transcript(Path::new(path)))
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .to_lowercase()
+                    .contains(query)
+            })
+            .unwrap_or(false)
     }
 
     fn resume_command(&self, session_id: &str, _path: &str) -> AgentCommand {
@@ -1064,6 +1109,154 @@ impl SessionSource for AgySource {
 mod tests {
     use super::*;
     use crate::util::parse_hunk_header;
+
+    struct StorageFixture(PathBuf);
+    impl StorageFixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("ccsv-agy-storage-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+        fn logs(&self, source: &str, id: &str) -> PathBuf {
+            let path = self.0.join(source).join(id).join(".system_generated/logs");
+            fs::create_dir_all(&path).unwrap();
+            path
+        }
+        fn write(&self, path: &Path, prompt: &str) {
+            let rows = [
+                serde_json::json!({"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":format!("<USER_REQUEST>{prompt}</USER_REQUEST>")}),
+                serde_json::json!({"step_index":1,"type":"PLANNER_RESPONSE","source":"MODEL","content":"Saved answer"}),
+            ];
+            fs::write(
+                path,
+                rows.iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+        }
+    }
+    impl Drop for StorageFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn full_only_conversation_is_discovered_readable_and_resumable() {
+        let fixture = StorageFixture::new();
+        let id = "1f0fe0e7-d2f8-4d5a-9069-7fb228af8e12";
+        let logs = fixture.logs("cli", id);
+        let full = logs.join("transcript_full.jsonl");
+        fixture.write(&full, "a full-only prompt");
+        let found = conversations_in(&[(fixture.0.join("cli"), false)]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], (id.to_string(), full.clone(), false));
+        assert_eq!(
+            AgySource
+                .read_session(full.to_str().unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(last_user_text(&full).as_deref(), Some("a full-only prompt"));
+        assert_eq!(
+            AgySource.resume_command(id, full.to_str().unwrap()).args(),
+            ["--conversation", id]
+        );
+        assert!(!logs.join("transcript.jsonl").exists());
+    }
+
+    #[test]
+    fn empty_cli_directory_does_not_shadow_valid_ide_history() {
+        let fixture = StorageFixture::new();
+        let id = "004ad409-1d4f-48fa-8b98-986de3f3c99e";
+        fixture.logs("cli", id);
+        let logs = fixture.logs("ide", id);
+        fixture.write(&logs.join("transcript_full.jsonl"), "from IDE");
+        let sources = [
+            (fixture.0.join("cli"), false),
+            (fixture.0.join("ide"), true),
+        ];
+        let found = conversations_in(&sources);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].2);
+        let cli = fixture
+            .0
+            .join("cli")
+            .join(id)
+            .join(".system_generated/logs/transcript_full.jsonl");
+        fixture.write(&cli, "from CLI");
+        let preferred = conversations_in(&sources);
+        assert_eq!(preferred.len(), 1);
+        assert!(!preferred[0].2);
+        assert_eq!(preferred[0].1, cli);
+    }
+
+    #[test]
+    fn full_only_rename_appends_once_without_creating_a_rolling_file() {
+        let fixture = StorageFixture::new();
+        let logs = fixture.logs("cli", "1f0fe0e7-d2f8-4d5a-9069-7fb228af8e12");
+        let full = logs.join("transcript_full.jsonl");
+        fixture.write(&full, "question");
+        AgySource.rename_session(&full, "New title").unwrap();
+        assert_eq!(
+            fs::read_to_string(&full)
+                .unwrap()
+                .matches(RENAME_MARKER)
+                .count(),
+            1
+        );
+        assert_eq!(extract_title(&full), "New title");
+        assert!(!logs.join("transcript.jsonl").exists());
+    }
+
+    #[test]
+    fn both_transcripts_are_renamed_once_even_when_entry_is_the_full_file() {
+        let fixture = StorageFixture::new();
+        let logs = fixture.logs("cli", "1f0fe0e7-d2f8-4d5a-9069-7fb228af8e12");
+        let normal = logs.join("transcript.jsonl");
+        let full = logs.join("transcript_full.jsonl");
+        fixture.write(&normal, "normal");
+        fixture.write(&full, "full");
+        AgySource.rename_session(&full, "Same title").unwrap();
+        for path in [&normal, &full] {
+            assert_eq!(
+                fs::read_to_string(path)
+                    .unwrap()
+                    .matches(RENAME_MARKER)
+                    .count(),
+                1
+            );
+            assert_eq!(extract_title(path), "Same title");
+        }
+    }
+
+    #[test]
+    fn full_entry_follows_a_more_complete_sibling_and_invalidates_search_cache() {
+        let fixture = StorageFixture::new();
+        let logs = fixture.logs("cli", "1f0fe0e7-d2f8-4d5a-9069-7fb228af8e12");
+        let normal = logs.join("transcript.jsonl");
+        let full = logs.join("transcript_full.jsonl");
+        fixture.write(&full, "old");
+        let path = full.to_str().unwrap();
+        let before = AgySource.source_mtime(path);
+        fixture.write(
+            &normal,
+            "new distinctive prompt which is much longer than the old one",
+        );
+        assert_eq!(preferred_transcript(&full), normal);
+        assert_ne!(before, AgySource.source_mtime(path));
+        assert!(AgySource.contains_text(path, "distinctive prompt"));
+        assert_eq!(AgySource.watch_target(path), Some(normal.clone()));
+        assert!(last_user_text(&full)
+            .unwrap()
+            .contains("distinctive prompt"));
+        fs::remove_file(&normal).unwrap();
+        assert_eq!(preferred_transcript(&normal), full);
+    }
 
     #[test]
     fn extract_user_request_strips_xml_wrapper() {

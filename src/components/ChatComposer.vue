@@ -78,6 +78,7 @@ import {
   codexPluginMentionRanges,
 } from '../codexPluginMentions'
 import { formatInlineFileMention, inlineFileMentions } from '../inlineFileMentions'
+import { isImeKey, resizeTextarea } from '../composerInput'
 import { nextInlineImageNumber } from '../inlineImages'
 import { rememberChatGuiPreference } from '../chatGuiPreferences'
 
@@ -270,6 +271,7 @@ watch(() => props.session, (session, previousSession) => {
   resetInlineImageSequence(text.value)
   exitHistory()
   stash.value = null
+  composing.value = false
   nextTick(autosize)
   focusInput()
 })
@@ -545,15 +547,14 @@ window.addEventListener('keydown', onPreviewKey)
 onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey))
 
 // ---------- 自适应高度 ----------
-// 新版 WebView2 原生支持 textarea 按内容伸缩；支持时避免每次输入都走
-// `height = auto -> scrollHeight` 这条同步布局路径。旧运行时保留 JS fallback。
+// 支持 field-sizing 的运行时交给浏览器；旧 WebView 在独立测量框计算高度，
+// 不能反复把正在编辑的 textarea 压回 auto，否则长文本滚动和光标会跳动。
 const nativeFieldSizing = typeof CSS !== 'undefined' && CSS.supports?.('field-sizing', 'content') === true
 function autosize() {
   if (nativeFieldSizing) return
   const el = taEl.value
   if (!el) return
-  el.style.height = 'auto'
-  el.style.height = `${Math.min(el.scrollHeight, 220)}px`
+  resizeTextarea(el, 220)
 }
 
 // ---------- slash 指令浮层（§10.1 动态发现）----------
@@ -717,7 +718,8 @@ const highlightHtml = computed(() => {
     last = range.end
   }
   out += escapeHtml(text.value.slice(last))
-  return out + ghostHtml
+  // div 会吞掉末尾换行的空行；零宽占位让最后一行与 textarea 一致。
+  return out + ghostHtml + '\u200b'
 })
 function onCompositionStart() {
   composing.value = true
@@ -730,8 +732,30 @@ function onCompositionEnd() {
 }
 // 文本超 max-height 滚动时，镜像层跟随 textarea 一起滚，保持对齐。
 function syncHlScroll() {
-  if (hlEl.value && taEl.value) hlEl.value.scrollTop = taEl.value.scrollTop
+  const el = taEl.value
+  const mirror = hlEl.value
+  if (!el || !mirror) return
+  // 使用实际可用宽度：实体滚动条会吃掉空间，缩放时 offsetWidth 差值还会取整。
+  mirror.style.width = `${el.clientWidth}px`
+  mirror.style.right = 'auto'
+  mirror.scrollTop = el.scrollTop
 }
+// input/合成结束可能新建镜像或增加内容，必须在 Vue 更新 DOM 后再同步滚动。
+watch([text, highlightActive], syncHlScroll, { flush: 'post' })
+let inputResizeObserver: ResizeObserver | undefined
+onMounted(() => {
+  if (!taEl.value) return
+  if (typeof ResizeObserver !== 'undefined') {
+    inputResizeObserver = new ResizeObserver(() => {
+      autosize()
+      syncHlScroll()
+    })
+    inputResizeObserver.observe(taEl.value)
+  }
+  autosize()
+  syncHlScroll()
+})
+onBeforeUnmount(() => inputResizeObserver?.disconnect())
 function onHlHover(e: MouseEvent) {
   const cmd = (e.target as HTMLElement).closest?.('.cc-cmd') as HTMLElement | null
   if (cmd?.dataset.cmdDesc != null) {
@@ -1094,6 +1118,7 @@ const CARET_MOVE_KEYS = new Set([
   'Home', 'End', 'PageUp', 'PageDown',
 ])
 function onCaretMove(e?: KeyboardEvent | MouseEvent) {
+  if (composing.value || (e?.type === 'keyup' && isImeKey(e as KeyboardEvent, false))) return
   // 普通文字输入后还会收到 keyup；input 已经处理过，不再重复测量 @ 坐标和过滤 / 列表。
   if (e?.type === 'keyup' && !CARET_MOVE_KEYS.has((e as KeyboardEvent).key)) return
   // 浏览历史回填态下不自动弹 `/` / `@` 浮层：回填进来的 `/context`、`@file` 等会让浮层张开，
@@ -1118,6 +1143,16 @@ function runInputWork() {
   autosize()
   detectSlash()
   detectMention()
+  nextTick(() => {
+    const el = taEl.value
+    if (!el || composing.value) return
+    // 达到最大高度后继续在末尾输入，仍须看得到新的一行。不能无条件滚到底，
+    // 否则用户在长文中间编辑时会被强行拉走；普通滚动也不走这条路径。
+    if (el.selectionStart === el.selectionEnd && el.selectionEnd === el.value.length) {
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
+    }
+    syncHlScroll()
+  })
 }
 
 function scheduleInputWork() {
@@ -1339,6 +1374,8 @@ function deleteInlineFileMentionAtCaret(key: 'Backspace' | 'Delete'): boolean {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  // 必须在浮层导航/确认和发送之前放行 IME；候选词的 Enter/方向键不属于编辑器。
+  if (isImeKey(e, composing.value)) return
   // WKWebView may expose a macOS screenshot as a native paste button instead
   // of a File in ClipboardEvent. Handle Command+V here so Chat gets the same
   // inline attachment behavior as drag/select, while plain text still pastes.

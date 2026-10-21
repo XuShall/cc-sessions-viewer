@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, defin
 import type { DirectiveBinding } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import type { Agent, Msg, SessionMeta, Block, ChatQuestionRequest, PiTreeNode } from '../types'
-import { agentLabel } from '../agentMeta'
+import { agentLabel, sessionCanManageFile, sessionHistoryOnly } from '../agentMeta'
 import { renderText, renderTextUncached, displaySessionId, formatTime, formatElapsedSeconds, historicalMessageExecutionMs, isCaveatOnlyMsg, isAskUserQuestionInstructionOnlyMsg, parseSystemEvent, cleanMetaText, metaKindIsPre, parseMetaFields, parseTeammateMessage, parseFileRef } from '../format'
 import type { MetaField } from '../format'
 import { prettifyAndHighlightJson } from '../jsonHighlight'
@@ -331,8 +331,10 @@ function toggleTools() {
 
 // Resume 按钮是否可用：回收站、缺 session id、缺 cwd 时禁用。
 const sessionArchived = computed(() => !!props.session.codexArchived)
+const historyOnly = computed(() => sessionHistoryOnly(props.agent, props.session.path))
+const canManageFile = computed(() => sessionCanManageFile(props.agent, props.session.path))
 const canResumeHere = computed(
-  () => !props.trashed && !sessionArchived.value && !!props.session.id && !!props.cwd,
+  () => !props.trashed && !sessionArchived.value && !historyOnly.value && !!props.session.id && !!props.cwd,
 )
 
 // 只读页可临时覆盖全局「显示工具调用」设置。该值不落盘，切换到另一会话时也会复位，
@@ -2512,7 +2514,7 @@ function onDocClick(e: MouseEvent) {
       <div class="t">
         <span class="t-text">{{ session.title }}</span>
         <button
-          v-if="!trashed"
+          v-if="!trashed && canManageFile"
           class="title-rename-ic"
           v-tooltip="t('chat.action.rename')"
           @click="$emit('rename')"
@@ -2535,6 +2537,9 @@ function onDocClick(e: MouseEvent) {
         >
           <span class="live-dot" />
           <span class="live-label">{{ t('chat.live') }}</span>
+        </span>
+        <span v-if="historyOnly" class="codex-special-tag" :aria-label="t('list.codex.historyOnlyHint')" v-tooltip="t('list.codex.historyOnlyHint')">
+          {{ t('list.codex.historyOnly') }}
         </span>
         <span v-if="sessionArchived" class="codex-special-tag">
           {{ t('list.codex.archived') }}
@@ -2634,7 +2639,7 @@ function onDocClick(e: MouseEvent) {
       v-if="!liveSession && !trashed"
       class="icon-btn"
       :class="{ disabled: !canResumeHere }"
-      v-tooltip="canResumeHere ? t('chat.action.resumeHere') : t('chat.action.resumeUnavailable')"
+      v-tooltip="historyOnly ? t('list.codex.historyOnlyHint') : canResumeHere ? t('chat.action.resumeHere') : t('chat.action.resumeUnavailable')"
       :disabled="!canResumeHere"
       @click="canResumeHere && $emit('resumeHere')"
     >
@@ -2642,7 +2647,7 @@ function onDocClick(e: MouseEvent) {
     </button>
     <!-- 打开目录 / 导出：read 与 live chat 两种模式都需要。 -->
     <button
-      v-if="!trashed && agent !== 'opencode'"
+      v-if="!trashed && agent !== 'opencode' && !historyOnly"
       class="icon-btn"
       v-tooltip="t('chat.action.reveal')"
       @click="$emit('reveal')"
@@ -2752,7 +2757,7 @@ function onDocClick(e: MouseEvent) {
     </div>
     <!-- 删除：read 与 live chat 两种模式都有（chat 里删 = 软删并停掉当前会话）。 -->
     <button
-      v-if="!trashed"
+      v-if="!trashed && canManageFile"
       class="icon-btn danger"
       v-tooltip="t('chat.action.delete')"
       @click="$emit('delete')"

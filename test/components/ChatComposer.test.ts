@@ -444,6 +444,91 @@ describe('ChatComposer', () => {
     }
   })
 
+  it.each([
+    { label: 'native IME state', composing: false, isComposing: true, keyCode: 13 },
+    { label: 'tracked composition state', composing: true, isComposing: false, keyCode: 13 },
+    { label: 'WebKit confirming Enter', composing: false, isComposing: false, keyCode: 229 },
+  ])('does not submit $label, but allows the next normal Enter', async (state) => {
+    const session = baseSession({ turnState: 'running' })
+    const wrapper = mount(ChatComposer, {
+      props: { session }, global: { directives: { tooltip: vTooltip } },
+    })
+    try {
+      await flushPromises()
+      const input = wrapper.find('textarea')
+      await input.setValue('unfinished ame')
+      if (state.composing) await input.trigger('compositionstart')
+      await input.trigger('keydown', { key: 'Enter', isComposing: state.isComposing, keyCode: state.keyCode })
+      expect(session.queue).toEqual([])
+      expect((input.element as HTMLTextAreaElement).value).toBe('unfinished ame')
+      await input.trigger('compositionend')
+      await input.trigger('keydown', { key: 'Enter', isComposing: false, keyCode: 13 })
+      expect(session.queue.map((q) => q.text)).toEqual(['unfinished ame'])
+    } finally { wrapper.unmount() }
+  })
+
+  it('does not confirm a slash popup with an IME confirmation key', async () => {
+    const wrapper = mount(ChatComposer, {
+      props: { session: baseSession() }, global: { directives: { tooltip: vTooltip } },
+    })
+    try {
+      await flushPromises()
+      const input = wrapper.find('textarea')
+      await input.setValue('/exp')
+      expect(wrapper.find('.cc-slash').exists()).toBe(true)
+      await input.trigger('compositionstart')
+      await input.trigger('keydown', { key: 'Enter', isComposing: true })
+      expect((input.element as HTMLTextAreaElement).value).toBe('/exp')
+      expect(wrapper.find('.cc-slash').exists()).toBe(true)
+    } finally { wrapper.unmount() }
+  })
+
+  it('aligns a newly rendered mirror with the scrollbar and preserves the final empty line', async () => {
+    const wrapper = mount(ChatComposer, {
+      props: { session: baseSession() }, global: { directives: { tooltip: vTooltip } },
+    })
+    try {
+      await flushPromises()
+      const input = wrapper.find('textarea')
+      const el = input.element as HTMLTextAreaElement
+      Object.defineProperties(el, { offsetWidth: { value: 300 }, clientWidth: { value: 295 } })
+      el.scrollTop = 400
+      el.value = '/export\n' + 'reference code\n'.repeat(30)
+      el.setSelectionRange(10, 10)
+      await input.trigger('input')
+      const mirror = wrapper.find<HTMLElement>('.cc-highlight')
+      expect(mirror.element.style.width).toBe('295px')
+      expect(mirror.element.scrollTop).toBe(400)
+      expect(mirror.element.textContent).toBe(el.value + '\u200b')
+      await input.trigger('compositionstart')
+      expect(wrapper.find('.cc-highlight').exists()).toBe(false)
+      await input.trigger('compositionend')
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find<HTMLElement>('.cc-highlight').element.scrollTop).toBe(400)
+      expect(el.value.endsWith('\n')).toBe(true)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([true, false])('follows long input only when editing at the end (atEnd=%s)', async (atEnd) => {
+    const wrapper = mount(ChatComposer, {
+      props: { session: baseSession() }, global: { directives: { tooltip: vTooltip } },
+    })
+    try {
+      const input = wrapper.find('textarea')
+      const el = input.element as HTMLTextAreaElement
+      Object.defineProperties(el, { scrollHeight: { value: 1600 }, clientHeight: { value: 220 } })
+      el.value = 'long reference code\n'.repeat(60)
+      el.setSelectionRange(atEnd ? el.value.length : 10, atEnd ? el.value.length : 10)
+      el.scrollTop = 123
+      await input.trigger('input')
+      expect(el.scrollTop).toBe(atEnd ? 1380 : 123)
+      // 滚轮/滚动条是用户阅读行为，即使光标还在末尾，也不能被强行拉到底。
+      el.scrollTop = 42
+      await input.trigger('scroll')
+      expect(el.scrollTop).toBe(42)
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps the effort slider for Claude subscription sessions', () => {
     setLang('en')
     const wrapper = mount(ChatComposer, {
@@ -596,6 +681,21 @@ describe('ChatComposer @ file mention', () => {
     // 目录带尾斜杠展示，文件原名。
     expect(popup.text()).toContain('.codex/')
     expect(popup.text()).toContain('README.md')
+  })
+
+  it('leaves mention navigation and confirmation to the IME while composing', async () => {
+    const wrapper = mountComposer()
+    try {
+      await typeAt(wrapper, '@')
+      const input = wrapper.find('textarea')
+      const activeBefore = wrapper.find('.cc-mention-item.active').text()
+      await input.trigger('compositionstart')
+      await input.trigger('keydown', { key: 'ArrowDown', isComposing: true })
+      expect(wrapper.find('.cc-mention-item.active').text()).toBe(activeBefore)
+      await input.trigger('keydown', { key: 'Enter', isComposing: true })
+      expect((input.element as HTMLTextAreaElement).value).toBe('@')
+      expect(wrapper.find('.cc-mention').exists()).toBe(true)
+    } finally { wrapper.unmount() }
   })
 
   it('keeps the mention popup open with an explicit empty state', async () => {

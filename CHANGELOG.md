@@ -6,6 +6,48 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ---
 
+## [v0.6.1] — Unreleased
+
+### Bug Fixes
+
+- **Modern Codex history no longer disappears from the viewer** — discover compressed `.jsonl.zst` rollouts and paginated SQLite history alongside plain JSONL, respect `CODEX_HOME`, and merge duplicate session IDs. Compressed files are read in memory and databases are opened read-only; original history is not rewritten or unpacked into the user's session directory.
+- **Missing Codex rollouts are clearly marked as history-only** — database display history remains available for viewing and export, but cannot reconstruct the original context required by Codex. Disable resume and file-management actions for these records, and reject embedded-terminal, external-terminal, and GUI resume before starting a process. Compressed sessions with their original rollout retain native resume support.
+- **Antigravity full-history discovery** — find sessions that have only `transcript_full.jsonl`, prefer the more complete transcript, and do not let an empty CLI directory hide an IDE copy. Keep previews, search, cache invalidation, and file watching consistent, and avoid appending a rename twice when opening the full transcript directly.
+- **IME confirmation no longer submits unfinished chat input** — guard composition state and WebKit's confirming Enter before sending or handling command/file popups. Apply the same protection to the main composer, Claude `/btw`, and Codex `/side` inputs ([#92](https://github.com/jerrywu001/cc-sessions-viewer/issues/92)).
+- **Long chat drafts keep the cursor and text aligned** — follow new lines while typing at the end without overriding manual scrolling or edits in the middle. Avoid collapsing the active textarea during fallback height measurement, and align highlighted text with the scrollbar width, final empty line, and zoomed layout ([#92](https://github.com/jerrywu001/cc-sessions-viewer/issues/92)).
+
+### Improvements
+
+- **Codex storage changes stay in sync** — refresh search, previews, cached metadata, and watched sessions when compressed rollouts or SQLite/WAL history change, including sessions opened before a storage migration.
+
+### Documentation
+
+- **Expanded multilingual guides** — document agent history formats, recorded context, search and export coverage, compatibility limits, and privacy boundaries, with synthetic examples and automated content/link checks.
+- **Claude Code usage tools on the documentation site** — add a local-browser JSONL token counter and API-equivalent cost calculator in English, Chinese, and Japanese. Explain duplicate usage snapshots, missing records, cache lifetimes, and why calculated API cost is not a subscription bill or remaining quota.
+
+### Tests
+
+- Added regression coverage for compressed and paginated Codex storage, deduplication, cache/watch revisions, missing-rollout resume guards, and history-only UI actions.
+- Added coverage for Antigravity full-only transcripts and consistent discovery, reading, and rename behavior.
+- Added 25 frontend regressions for IME confirmation, command/file popup handling, long-draft scrolling, mirror alignment, and fallback sizing, including both side-chat inputs.
+
+## [v0.6.0]
+
+### Features
+
+- **Built-in project file workspace** — browse, create, search, edit, and delete project files in a full-screen editor without closing the session layout underneath. Includes syntax highlighting, Markdown/MDX preview, and project-wide text search with case-sensitive, whole-word, regular-expression, include, and exclude options.
+- **Quick open project files** — use `Cmd/Ctrl+P` inside the editor to fuzzy-match filenames and paths, navigate results with the keyboard, and open the selected file. Closing the palette restores focus without intercepting the shortcut elsewhere in the app.
+
+### Improvements
+
+- **Worktree-specific Git review** — switch the editor's Source Control view between the main working tree and linked worktrees to review their uncommitted changes, commit history, and individual commit diffs. Persistent horizontal and vertical scrollbars keep long diffs navigable.
+- **Context-aware editor shortcuts** — `Cmd/Ctrl+Shift+E` opens the selected project's editor; `Cmd/Ctrl+Shift+F` targets project search while the editor is open and global search otherwise. Group editor shortcuts separately in Settings and add localized editor documentation.
+- **Project file safeguards** — restrict operations to the selected root, refuse symbolic-link traversal, confirm deletion, and check for external file changes before saving. Binary and oversized files are not editable.
+
+### Tests
+
+- Added coverage for project file operations, search highlighting, fuzzy file matching, editor shortcut scope and focus, worktree-specific Git requests, and persistent scrollbar dragging and keyboard navigation.
+
 ## [v0.5.3]
 
 ### Features

@@ -949,6 +949,9 @@ export default {
   'settings.version': '版本',
   'list.codex.internal': '審核會話',
   'list.codex.archived': '已封存會話',
+  'list.codex.historyOnly': '僅可查看歷史',
+  'list.codex.historyOnlyHint': '原始 Codex 會話檔案已缺失，仍可查看及匯出歷史，但無法繼續會話。',
+  'list.codex.managedHistoryHint': '此壓縮或資料庫歷史由 Codex 管理，請在 Codex 中重新命名或刪除。',
 
   'toast.sessionStatsComingSoon': '會話統計頁面開發中 —— 即將在本版本上線',
 

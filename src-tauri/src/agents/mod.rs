@@ -180,12 +180,12 @@ const SNIPPET_WIN: usize = 60;
 pub mod agy;
 pub mod claude;
 pub mod codex;
+#[cfg(test)]
+mod docs_fixtures;
 pub mod grok;
 pub mod kimi;
 pub mod opencode;
 pub mod pi;
-#[cfg(test)]
-mod docs_fixtures;
 
 /// A session's on-disk storage boundary.
 ///
@@ -375,6 +375,13 @@ pub trait SessionSource: Send + Sync {
 
     /// 终端里 resume 一个会话用的 CLI 命令。`session_id` 已经过 [A-Za-z0-9-]+ 校验。
     fn resume_command(&self, session_id: &str, path: &str) -> AgentCommand;
+
+    /// Check source-owned prerequisites before creating a PTY, terminal, GUI
+    /// writer lease, or child process. A recovered display history need not be
+    /// sufficient for the native agent to resume its original model context.
+    fn validate_resume(&self, _session_id: &str, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
 
     /// 终端里开一个全新会话用的 CLI 命令（不带 --resume）。
     fn new_session_command(&self) -> AgentCommand;

@@ -939,6 +939,7 @@ fn pty_spawn(
         return Err("Invalid session ID".to_string());
     }
     let source = agents::source(&agent)?;
+    source.validate_resume(&session_id, &path)?;
     if agent == "pi" {
         agents::pi::validate_terminal_cwd(Path::new(&path), Path::new(&cwd))?;
     }
@@ -1322,6 +1323,7 @@ fn resume_session(
         return Err("Invalid session ID".to_string());
     }
     let source = agents::source(&agent)?;
+    source.validate_resume(&session_id, &path)?;
     if agent == "pi" {
         agents::pi::validate_terminal_cwd(Path::new(&path), Path::new(&cwd))?;
     }

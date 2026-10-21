@@ -131,6 +131,42 @@ const factory = (sessions: SessionMeta[] = [session()], props: Partial<Props> = 
   })
 
 describe('SessionsView', () => {
+  it('marks database-only Codex records as history-only and keeps browse/export without resume or file actions', async () => {
+    const target = session({ path: 'codex://original-id' })
+    const wrapper = factory([target], { agent: 'codex' })
+    expect(wrapper.find('.codex-special-tag').text()).toBe('History only')
+    expect(wrapper.find('.codex-special-tag').attributes('aria-label')).toContain('cannot resume')
+    expect(wrapper.find('.title-rename-ic').exists()).toBe(false)
+    expect(wrapper.find('.session-actions .danger').exists()).toBe(false)
+    // Background read, export, pin and sink remain; GUI chat, TUI and reveal do not.
+    expect(wrapper.findAll('.session-actions .icon-btn')).toHaveLength(4)
+    await wrapper.find('.session-card').trigger('click')
+    expect(wrapper.emitted('open')?.[0]).toEqual([target])
+    expect(wrapper.emitted('resume')).toBeUndefined()
+    expect(wrapper.emitted('chat')).toBeUndefined()
+  })
+
+  it('keeps both resume modes for compressed Codex history but hides unsafe rename/delete', () => {
+    const wrapper = factory([session({ path: '/sessions/rollout-id.jsonl.zst' })], { agent: 'codex' })
+    expect(wrapper.find('.codex-special-tag').exists()).toBe(false)
+    expect(wrapper.find('.title-rename-ic').exists()).toBe(false)
+    expect(wrapper.find('.session-actions .danger').exists()).toBe(false)
+    // Background read, GUI chat, TUI, reveal, export, pin and sink.
+    expect(wrapper.findAll('.session-actions .icon-btn')).toHaveLength(7)
+  })
+
+  it('disables mixed batch deletion when a selected record is Codex-managed history', async () => {
+    const target = session({ path: 'codex://original-id' })
+    const wrapper = factory([target], { agent: 'codex' })
+    sessionSelectMode.value = true
+    selectedSessions.value = new Set([target.path])
+    await flushPromises()
+    const remove = wrapper.find('.list-head .danger')
+    expect(remove.attributes('disabled')).toBeDefined()
+    await remove.trigger('click')
+    expect(wrapper.emitted('batch-delete')).toBeUndefined()
+  })
+
   it('shows the project Git branch in the header action area', async () => {
     const wrapper = factory()
     await flushPromises()

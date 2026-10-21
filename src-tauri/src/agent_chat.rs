@@ -653,6 +653,9 @@ pub fn start(
     // reclaude 只适用于 Claude CLI；其他 agent（Codex 等）直接运行自己的 CLI。
     let use_reclaude = use_reclaude && agent == "claude";
     let source = agents::source(&agent)?;
+    if let Some(session_id) = session_id.as_deref() {
+        source.validate_resume(session_id, "")?;
+    }
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let session_lease = if !fork {
         session_id
@@ -2265,7 +2268,7 @@ fn flush_codex_pending_plan_items(
     }
 }
 
-fn codex_item_to_msg(item: &serde_json::Value) -> Option<crate::types::Msg> {
+pub(crate) fn codex_item_to_msg(item: &serde_json::Value) -> Option<crate::types::Msg> {
     match item
         .get("type")
         .and_then(serde_json::Value::as_str)

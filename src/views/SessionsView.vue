@@ -47,7 +47,7 @@ import NewMenu from '../components/NewMenu.vue'
 import GitBranchControl from '../components/GitBranchControl.vue'
 import { PaneActionsKey } from '../paneActions'
 import { chatSupported } from '../chatComposerOptions'
-import { agentSupports } from '../agentMeta'
+import { agentSupports, sessionCanManageFile, sessionHistoryOnly } from '../agentMeta'
 
 const pa = inject(PaneActionsKey)!
 
@@ -461,8 +461,13 @@ function codexRankLabel(s: SessionMeta): string {
   return `首屏 ${position}/${firstPageSize} · rank ${rank}`
 }
 
+const selectedIncludesManagedHistory = computed(() => visibleSessions.value.some(
+  s => selectedSessions.value.has(s.path) && !sessionCanManageFile(props.agent, s.path),
+))
+
 function codexSpecialLabel(s: SessionMeta): string {
   if (props.agent !== 'codex') return ''
+  if (sessionHistoryOnly(props.agent, s.path)) return t('list.codex.historyOnly')
   if (s.codexArchived) return t('list.codex.archived')
   if (s.codexInternal) return t('list.codex.internal')
   return ''
@@ -738,8 +743,8 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
         </div>
         <button
           class="icon-btn danger"
-          :disabled="headSelectedCount === 0"
-          v-tooltip="t('list.tb.deleteSelected')"
+          :disabled="headSelectedCount === 0 || selectedIncludesManagedHistory"
+          v-tooltip="selectedIncludesManagedHistory ? t('list.codex.managedHistoryHint') : t('list.tb.deleteSelected')"
           @click="emit('batch-delete')"
         >
           <IconTrash />
@@ -896,7 +901,7 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
             :class="{ 'kw-hit': seg.hit }"
           >{{ seg.text }}</span></span>
           <button
-            v-if="!sessionSelectMode"
+            v-if="!sessionSelectMode && sessionCanManageFile(agent, s.path)"
             class="title-rename-ic"
             v-tooltip="t('list.action.rename')"
             @click.stop="emit('rename', s)"
@@ -939,7 +944,9 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
               <IconCopy />
             </button>
           </span>
-          <span v-if="codexSpecialLabel(s)" class="codex-special-tag">
+          <span v-if="codexSpecialLabel(s)" class="codex-special-tag"
+            :aria-label="sessionHistoryOnly(agent, s.path) ? t('list.codex.historyOnlyHint') : undefined"
+            v-tooltip="sessionHistoryOnly(agent, s.path) ? t('list.codex.historyOnlyHint') : codexSpecialLabel(s)">
             {{ codexSpecialLabel(s) }}
           </span>
           <span v-else-if="codexRankLabel(s)">{{ codexRankLabel(s) }}</span>
@@ -955,7 +962,7 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
           <IconExternalLink />
         </button>
         <button
-          v-if="chatSupported(agent) && project.exists"
+          v-if="chatSupported(agent) && project.exists && !sessionHistoryOnly(agent, s.path)"
           class="icon-btn"
           v-tooltip="t('list.action.openChat')"
           @click.stop="s.codexArchived ? emit('archivedBlock', `codex unarchive ${s.id}`) : emit('chat', s)"
@@ -963,7 +970,7 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
           <IconChat />
         </button>
         <button
-          v-if="project.exists"
+          v-if="project.exists && !sessionHistoryOnly(agent, s.path)"
           class="icon-btn"
           v-tooltip="s.cwd?.startsWith('ide://') ? t('list.action.resumeIde') : t('list.action.resume')"
           @click.stop="s.codexArchived ? emit('archivedBlock', `codex unarchive ${s.id}`) : emit('resume', s)"
@@ -971,7 +978,7 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
           <IconPlay />
         </button>
         <button
-          v-if="agent !== 'opencode'"
+          v-if="agent !== 'opencode' && !sessionHistoryOnly(agent, s.path)"
           class="icon-btn"
           v-tooltip="t('list.action.reveal')"
           @click.stop="emit('reveal', s.path)"
@@ -1043,6 +1050,7 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
           <IconPinDown />
         </button>
         <button
+          v-if="sessionCanManageFile(agent, s.path)"
           class="icon-btn danger"
           v-tooltip="t('list.action.trash')"
           @click.stop="emit('delete', s)"

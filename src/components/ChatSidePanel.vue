@@ -9,6 +9,7 @@ import { now, sendPrompt, interruptChat, type ChatSession } from '../chatSession
 import { closeSideChat, isBtwMinimized, setBtwMinimized } from '../sideChat'
 import { focusedPane } from '../panes'
 import type { Block, Msg } from '../types'
+import { isImeKey, resizeTextarea } from '../composerInput'
 import { IconChevronRight, IconClose, IconMinimize, IconSend, IconStop, IconZap } from './icons'
 
 const props = defineProps<{ session: ChatSession; hidden?: boolean }>()
@@ -266,13 +267,17 @@ watch(
 
 // ---------- 紧凑输入 ----------
 const draft = ref('')
+const composing = ref(false)
 const taEl = ref<HTMLTextAreaElement | null>(null)
 const canSend = computed(() => draft.value.trim().length > 0 && !errored.value)
 function autosize() {
   const el = taEl.value
   if (!el) return
-  el.style.height = 'auto'
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px'
+  resizeTextarea(el, 120)
+}
+function onCompositionEnd() {
+  composing.value = false
+  nextTick(autosize)
 }
 async function submit() {
   if (running.value || !canSend.value) return
@@ -286,7 +291,8 @@ function onPrimary() {
   else void submit()
 }
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  if (isImeKey(e, composing.value)) return
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     void submit()
   }
@@ -368,7 +374,9 @@ defineExpose({ focusInput: () => taEl.value?.focus() })
           rows="1"
           :placeholder="t('chat.btw.placeholder')"
           :disabled="errored"
-          @input="autosize"
+          @input="!composing && autosize()"
+          @compositionstart="composing = true"
+          @compositionend="onCompositionEnd"
           @keydown="onKeydown"
         />
         <button

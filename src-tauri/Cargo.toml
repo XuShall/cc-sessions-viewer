@@ -31,6 +31,9 @@ dirs = "5"
 # bundled = 编译期把 SQLite 源码静态链进来，不依赖系统 libsqlite3，
 # macOS 系统库版本太旧，Windows 也没有，bundled 一劳永逸
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Codex migrates inactive rollouts to .jsonl.zst; decode in-process, without
+# rewriting the user's history or requiring a system zstd executable.
+zstd = "0.13"
 # 全局搜索时跨 session 并行扫描；rayon 是纯 CPU work-stealing 线程池，零运行时配置。
 rayon = "1"
 # 统计活动分类（codeburn 风格的关键词正则）+ Bash 命令首词提取用。

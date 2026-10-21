@@ -957,6 +957,9 @@ export default {
   'settings.version': 'バージョン',
   'list.codex.internal': 'レビューセッション',
   'list.codex.archived': 'アーカイブ済みセッション',
+  'list.codex.historyOnly': '履歴のみ',
+  'list.codex.historyOnlyHint': '元の Codex セッションファイルがありません。履歴の閲覧とエクスポートはできますが、再開はできません。',
+  'list.codex.managedHistoryHint': '圧縮・データベース履歴の名前変更や削除は Codex で行ってください。',
 
   'toast.sessionStatsComingSoon': 'セッション統計ページは間もなく公開予定',
 

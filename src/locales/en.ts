@@ -961,6 +961,9 @@ export default {
   'settings.version': 'Version',
   'list.codex.internal': 'Review session',
   'list.codex.archived': 'Archived session',
+  'list.codex.historyOnly': 'History only',
+  'list.codex.historyOnlyHint': 'The original Codex session file is missing. You can view and export this history, but cannot resume it.',
+  'list.codex.managedHistoryHint': 'Manage this compressed or database-backed history in Codex to rename or delete it.',
 
   // ---------- Stats dashboard ----------
   'stats.title': 'Statistics',

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, onMounted, onUnmounted, watch, nextTick, provide, defineAsyncComponent } from 'vue'
 import type { Agent, ProjectInfo, SessionMeta, TrashItem, Msg, UsageSummary } from './types'
-import { agentLabel, agentSupports } from './agentMeta'
+import { agentLabel, agentSupports, sessionCanManageFile, sessionHistoryOnly } from './agentMeta'
 import * as api from './api'
 import { shortName } from './format'
 import { getProjectSearchShortcutTarget, isProjectEditorShortcut } from './projectEditor'
@@ -1247,6 +1247,10 @@ function hasActiveKimiTerminal(sessionPath: string) {
 }
 
 function openRename(s: SessionMeta) {
+  if (!sessionCanManageFile(agent.value, s.path)) {
+    notify(t('list.codex.managedHistoryHint'), true)
+    return
+  }
   renameModal.value = {
     show: true,
     agent: agent.value,
@@ -2585,6 +2589,10 @@ function restoreTarget(item: TrashItem): HTMLElement | null {
 function deleteSession(s: SessionMeta) {
   const fromChat = openSession.value?.path === s.path
   const deleteAgent = fromChat ? chatAgent.value : agent.value
+  if (!sessionCanManageFile(deleteAgent, s.path)) {
+    notify(t('list.codex.managedHistoryHint'), true)
+    return
+  }
   const deleteKey = s.id || s.path
   const afterDelete = async () => {
     closeTabBySessionPath(s.path)
@@ -2762,6 +2770,10 @@ function batchDeleteSessions() {
   const keys = new Set(selectedSessions.value)
   const items = sessions.value.filter((s) => keys.has(s.path))
   if (!items.length) return
+  if (items.some(s => !sessionCanManageFile(agent.value, s.path))) {
+    notify(t('list.codex.managedHistoryHint'), true)
+    return
+  }
   ask({
     title: t('dialog.batchDelete.title'),
     message: t('dialog.batchDelete.body', { n: items.length }),
@@ -3337,6 +3349,10 @@ function resumeChatFromSession(s: SessionMeta): Promise<void> {
 }
 
 async function resumeChatFromSessionOnce(s: SessionMeta, agent: Agent) {
+  if (sessionHistoryOnly(agent, s.path)) {
+    notify(t('list.codex.historyOnlyHint'), true)
+    return
+  }
   // If a Chat tab was explicitly closed, wait until its async stop releases the writer
   // before restarting the same source thread from the list.
   await waitForChatClose(agent, s.id)
@@ -3672,6 +3688,10 @@ async function deleteFromLiveChat() {
 
 /** Resume 一个会话 —— 根据设置决定走窗口内 TUI 还是外部终端。 */
 async function resumeHere(s: SessionMeta, allowNonDefault = false) {
+  if (sessionHistoryOnly(chatAgent.value, s.path)) {
+    notify(t('list.codex.historyOnlyHint'), true)
+    return
+  }
   if (s.cwd?.startsWith('ide://')) {
     notify(t('toast.resumeIdeSession'))
     return

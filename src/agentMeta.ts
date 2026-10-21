@@ -123,6 +123,17 @@ export const AGENT_META: Record<Agent, AgentMeta> = {
   },
 }
 
+/** Native Codex still needs its rollout, even when display items survived in
+ * thread_history. These virtual records are browse/export-only. */
+export function sessionHistoryOnly(agent: Agent, path: string): boolean {
+  return agent === 'codex' && path.startsWith('codex://')
+}
+
+/** Never partially rewrite compressed or database-owned Codex history. */
+export function sessionCanManageFile(agent: Agent, path: string): boolean {
+  return agent !== 'codex' || (!sessionHistoryOnly(agent, path) && !path.endsWith('.jsonl.zst'))
+}
+
 export function agentLabel(agent: Agent, long = false): string {
   const meta = AGENT_META[agent]
   return long ? meta.label : meta.shortLabel
