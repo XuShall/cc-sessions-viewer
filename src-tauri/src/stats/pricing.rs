@@ -67,7 +67,7 @@ pub fn lookup(model: &str) -> Option<ModelCosts> {
     let canon = if has_isolated_provider_prefix(&with_prefix) {
         None
     } else {
-        Some(resolve_alias(model_id_without_provider(&with_prefix)))
+        Some(reference_model_id(&with_prefix).unwrap_or_else(|| resolve_alias(model_id_without_provider(&with_prefix))))
     };
 
     for key in [model, with_prefix.as_str()] {
@@ -127,7 +127,7 @@ pub fn lookup_strict(model: &str) -> Option<ModelCosts> {
     // user-owned `custom/grok-*` model cannot inherit an official price.
     let custom_endpoint = has_isolated_provider_prefix(&unpinned);
     if !custom_endpoint {
-        let canon = resolve_alias(model_id_without_provider(&unpinned));
+        let canon = reference_model_id(&unpinned).unwrap_or_else(|| resolve_alias(model_id_without_provider(&unpinned)));
         if !candidates.contains(&canon) {
             candidates.push(canon);
         }
@@ -318,6 +318,13 @@ fn resolve_alias(name: &str) -> String {
     name.to_string()
 }
 
+fn reference_model_id(model: &str) -> Option<String> {
+    let mut parts = model.rsplit('/');
+    let id = parts.next()?;
+    let provider = parts.next()?;
+    REFERENCE_PROVIDERS.contains(&provider).then(|| format!("{provider}/{id}"))
+}
+
 fn model_id_without_provider(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
@@ -344,7 +351,16 @@ const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 // 避免新解析逻辑去读旧格式缓存。
 // v4 removes the OpenCode model whitelist and inferred cache prices. Refresh once
 // after upgrade even if the old v3 catalog is still within its 24-hour TTL.
-const CACHE_FILE_NAME: &str = "model-pricing-v4.json";
+const CACHE_FILE_NAME: &str = "model-pricing-v5.json";
+
+// Official pay-as-you-go catalogs, not gateways or subscription/token plans.
+// Keep provider-qualified IDs: China/global endpoints and Zen may price the
+// same model differently. New model IDs still arrive entirely from upstream.
+const REFERENCE_PROVIDERS: &[&str] = &[
+    "deepseek", "moonshotai", "moonshotai-cn", "minimax", "minimax-cn",
+    "alibaba", "alibaba-cn", "zai", "zhipuai", "xiaomi", "stepfun", "stepfun-ai",
+    "volcengine", "tencent-tokenhub", "mistral", "cohere",
+];
 
 static REMOTE_PRICING: OnceCell<RwLock<HashMap<String, ModelCosts>>> = OnceCell::new();
 static IS_FETCHING: AtomicBool = AtomicBool::new(false);
@@ -454,13 +470,11 @@ pub fn list_for_ui() -> Vec<PricingEntry> {
     };
     let mut out: Vec<PricingEntry> = Vec::with_capacity(64);
     for (raw_name, costs) in table.iter() {
-        // 防御：带 provider 前缀 / `@default` deployment alias 的 key 不展示。
-        // models.dev 的三家 provider 都是裸 ID，正常拉取不会出现这两种；留着
-        // 是防上游格式漂移（测试 with_remote 塞的 key 也可能带）。
-        if raw_name.contains('/') || raw_name.ends_with("@default") {
+        let (provider, model_name) = raw_name.split_once('/').map_or((None, raw_name.as_str()), |(p, m)| (Some(p), m));
+        if provider.is_some_and(|p| !REFERENCE_PROVIDERS.contains(&p)) || raw_name.ends_with("@default") {
             continue;
         }
-        let lower = raw_name.to_ascii_lowercase();
+        let lower = model_name.to_ascii_lowercase();
         // Codex CLI / Claude Code 用户实际只跑 chat completion 那条线 —— 把跟它不相干的
         // GPT 变体过滤掉。否则像 `gpt-oss-120b`（开源权重，名字里 "120" 是参数量不是版本）
         // 会被 version_tuple 解析成 [120]，排到 gpt-5 [5] 前面 —— 用户反馈过这个。
@@ -485,7 +499,9 @@ pub fn list_for_ui() -> Vec<PricingEntry> {
         if is_noise {
             continue;
         }
-        let family: &'static str = if lower.starts_with("claude-") {
+        let family: &'static str = if provider.is_some() {
+            "other"
+        } else if lower.starts_with("claude-") {
             "claude"
         } else if lower.starts_with("codex-")
             || lower.contains("-codex")
@@ -527,6 +543,7 @@ pub fn list_for_ui() -> Vec<PricingEntry> {
         "grok" => 2,
         "agy" => 3,
         "opencode" => 4,
+        "other" => 5,
         _ => 9,
     };
     // 同 family 内："版本号倒序" 主键 + "naked > 日期 pin 倒序" tiebreak。
@@ -536,6 +553,11 @@ pub fn list_for_ui() -> Vec<PricingEntry> {
     out.sort_by(|a, b| {
         family_rank(a.family)
             .cmp(&family_rank(b.family))
+            .then_with(|| {
+                if a.family == "other" && b.family == "other" {
+                    a.name.split('/').next().cmp(&b.name.split('/').next())
+                } else { std::cmp::Ordering::Equal }
+            })
             .then_with(|| version_tuple(&b.name).cmp(&version_tuple(&a.name)))
             .then_with(|| pin_key(&b.name).cmp(&pin_key(&a.name)))
             // 极端 tie（同版本同 pin）：lex 字典正序保证 deterministic。
@@ -630,6 +652,7 @@ pub fn clear_cache_and_refresh() {
 
     if let Some(path) = cache_path() {
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_file_name("model-pricing-v4.json"));
         let _ = std::fs::remove_file(path.with_file_name("model-pricing-v3.json"));
         let _ = std::fs::remove_file(path.with_file_name("models-dev-pricing-v2.json"));
         let _ = std::fs::remove_file(path.with_file_name("models-dev-pricing.json"));
@@ -688,6 +711,7 @@ fn load_from_cache() -> Option<(bool, HashMap<String, ModelCosts>)> {
     }
     // 旧缓存只作为离线启动兜底：强制后台刷新完整目录，成功后只写 v4。
     for old_name in [
+        "model-pricing-v4.json",
         "model-pricing-v3.json",
         "models-dev-pricing-v2.json",
         "models-dev-pricing.json",
@@ -817,6 +841,18 @@ pub(crate) fn parse_models_dev_json(body: &str) -> Option<HashMap<String, ModelC
             }
         }
     }
+    // Step 3: Other official providers are independent reference rows. Never
+    // overwrite a native or Zen bare ID with a different endpoint's tariff.
+    for provider in REFERENCE_PROVIDERS {
+        let Some(models) = root.get(*provider).and_then(|p| p.get("models")).and_then(|m| m.as_object()) else { continue; };
+        for (name, entry) in models {
+            if entry.get("modalities").and_then(|m| m.get("output")).and_then(|o| o.as_array())
+                .is_some_and(|outputs| !outputs.iter().any(|v| v == "text")) { continue; }
+            if let Some(costs) = parse_models_dev_entry(entry) {
+                out.insert(format!("{provider}/{name}"), costs);
+            }
+        }
+    }
     if out.is_empty() {
         return None;
     }
@@ -829,18 +865,13 @@ fn parse_models_dev_entry(v: &serde_json::Value) -> Option<ModelCosts> {
     // （gpt-image / gemma 开源权重这类）直接跳过 —— CLI 也跑不到它们。
     const PER_MTOK: f64 = 1e-6;
     let cost = obj.get("cost").and_then(|c| c.as_object())?;
-    let input = cost.get("input").and_then(|x| x.as_f64())? * PER_MTOK;
-    let output = cost.get("output").and_then(|x| x.as_f64())? * PER_MTOK;
+    let rate = |key: &str| cost.get(key).and_then(|x| x.as_f64()).filter(|n| n.is_finite() && *n >= 0.0);
+    let input = rate("input")? * PER_MTOK;
+    let output = rate("output")? * PER_MTOK;
     // 没公布缓存单价就保持 0（UI 显示未知），不能把 Anthropic 的
     // write=input×1.25 / read=input×0.1 公式套到其它厂商。
-    let cw = cost
-        .get("cache_write")
-        .and_then(|x| x.as_f64())
-        .map(|x| x * PER_MTOK);
-    let cr = cost
-        .get("cache_read")
-        .and_then(|x| x.as_f64())
-        .map(|x| x * PER_MTOK);
+    let cw = rate("cache_write").map(|x| x * PER_MTOK);
+    let cr = rate("cache_read").map(|x| x * PER_MTOK);
     // limit.context = 上下文窗口 tokens。越界（> u32::MAX）钳到 0 当未知处理。
     let context = obj
         .get("limit")
@@ -1136,7 +1167,7 @@ mod tests {
     #[test]
     fn strict_lookup_supports_known_direct_provider_prefixes() {
         let rate = opus_4_7_costs();
-        with_remote(&[("deepseek-v4-flash", rate)], || {
+        with_remote(&[("deepseek/deepseek-v4-flash", rate)], || {
             assert_eq!(lookup_strict("deepseek/deepseek-v4-flash"), Some(rate));
             assert_eq!(
                 lookup_strict("gateway/deepseek/deepseek-v4-flash"),
@@ -1149,7 +1180,7 @@ mod tests {
     #[test]
     fn lookup_supports_multi_level_prefixes_without_leaking_local_prices() {
         let rate = opus_4_7_costs();
-        with_remote(&[("deepseek-v4-flash", rate)], || {
+        with_remote(&[("deepseek/deepseek-v4-flash", rate)], || {
             assert_eq!(
                 lookup("gateway/deepseek/deepseek-v4-flash@20260818"),
                 Some(rate)
@@ -1613,6 +1644,52 @@ mod tests {
         assert!(table.contains_key("kimi-k2-thinking"));
 
         assert!(table.contains_key("gemini-3.1-pro"));
+    }
+
+    #[test]
+    fn latest_official_catalogs_keep_region_and_service_prices_separate() {
+        // Representative upstream entries verified 2026-10-26. Future model
+        // IDs are intentionally data, never an allowlist in the parser.
+        let body = serde_json::json!({
+            "openai": {"models": {"gpt-6.1-terra": {"cost": {"input": 1, "output": 5, "cache_read": 0.05}}}},
+            "anthropic": {"models": {"claude-opus-5-5": {"cost": {"input": 4, "output": 20, "cache_write": 5, "cache_read": 0.2}}}},
+            "moonshotai": {"models": {"kimi-k3.1-pro": {"cost": {"input": 2, "output": 10}, "limit": {"context": 1048576}}}},
+            "minimax": {"models": {"MiniMax-M3.1-Flash": {"cost": {"input": 0.15, "output": 0.6, "cache_read": 0.015}}}},
+            "alibaba": {"models": {"qwen3.8-max": {"cost": {"input": 1, "output": 3}}}},
+            "alibaba-cn": {"models": {"qwen3.8-max": {"cost": {"input": 2, "output": 4}}}},
+            "xiaomi": {"models": {"mimo-v2.6-pro": {"cost": {"input": 1, "output": 2}}}},
+            "zai": {"models": {"glm-5.3-flashx": {"cost": {"input": 0.37, "output": 1.25}}}},
+            "deepseek": {"models": {
+                "reference-provider-test": {"cost": {"input": 0.15, "output": 0.6}},
+                "invalid-negative": {"cost": {"input": -1, "output": 2}},
+                "missing-price": {},
+                "audio-only": {"cost": {"input": 1, "output": 2}, "modalities": {"output": ["audio"]}}
+            }},
+            "opencode": {"models": {"reference-provider-test": {"cost": {"input": 0.3, "output": 1.2}}}},
+            "openrouter": {"models": {"unknown-gateway-test": {"cost": {"input": 99, "output": 99}}}}
+        }).to_string();
+        let table = parse_models_dev_json(&body).unwrap();
+        assert_eq!(table["gpt-6.1-terra"].input, 1e-6);
+        assert!((table["claude-opus-5-5"].output - 20e-6).abs() < 1e-15);
+        for name in ["moonshotai/kimi-k3.1-pro", "minimax/MiniMax-M3.1-Flash", "alibaba/qwen3.8-max", "alibaba-cn/qwen3.8-max", "xiaomi/mimo-v2.6-pro", "zai/glm-5.3-flashx"] {
+            assert!(table.contains_key(name), "missing {name}");
+        }
+        assert_ne!(table["alibaba/qwen3.8-max"], table["alibaba-cn/qwen3.8-max"]);
+        assert_ne!(table["deepseek/reference-provider-test"], table["reference-provider-test"]);
+        with_remote(&[("reference-isolation-test", table["reference-provider-test"])], || {
+            assert_eq!(lookup_strict("deepseek/reference-isolation-test"), None);
+            assert_eq!(lookup("deepseek/reference-isolation-test"), None);
+        });
+        assert!(!table.contains_key("invalid-negative"));
+        assert!(!table.contains_key("deepseek/invalid-negative"));
+        assert!(!table.contains_key("deepseek/missing-price"));
+        assert!(!table.contains_key("deepseek/audio-only"));
+        assert!(!table.contains_key("unknown-gateway-test"));
+        with_remote(&[("deepseek/reference-provider-test", table["deepseek/reference-provider-test"])], || {
+            assert_eq!(lookup_strict("deepseek/reference-provider-test"), Some(table["deepseek/reference-provider-test"]));
+            let row = list_for_ui().into_iter().find(|r| r.name == "deepseek/reference-provider-test").unwrap();
+            assert_eq!(row.family, "other");
+        });
     }
 
     #[test]

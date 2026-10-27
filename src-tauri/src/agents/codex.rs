@@ -38,6 +38,16 @@ pub struct CodexSource;
 
 #[path = "codex_storage.rs"]
 mod storage;
+#[path = "codex_trash.rs"]
+mod trash_storage;
+
+pub(crate) fn soft_delete_to_trash(path: &str, destination: &Path) -> Result<(), String> {
+    trash_storage::delete(&storage::codex_home(), path, destination)
+}
+
+pub(crate) fn restore_from_trash(directory: &Path) -> Result<(), String> {
+    trash_storage::restore(&storage::codex_home(), directory)
+}
 
 const CODEX_APP_FIRST_PAGE_SIZE: usize = 50;
 const CODEX_APP_LIST_PAGE_SIZE: usize = 100;
@@ -2775,6 +2785,9 @@ impl SessionSource for CodexSource {
     }
 
     fn read_session(&self, path: &str) -> Result<Vec<Msg>, String> {
+        if let Some((_, messages)) = trash_storage::preview(Path::new(path))? {
+            return Ok(messages);
+        }
         let mut msgs = read(path)?;
         post_process_codex_session_msgs(&mut msgs);
         Ok(msgs)
@@ -2902,7 +2915,16 @@ impl SessionSource for CodexSource {
     }
 
     fn trash_title(&self, path: &Path) -> String {
+        if let Ok(Some((title, _))) = trash_storage::preview(path) {
+            return title;
+        }
         first_user_text(path)
+    }
+
+    fn hard_delete_session(&self, path: &Path) -> Result<(), String> {
+        let bundle = crate::trash::trash_dir().join(format!("codex-delete-{}", uuid::Uuid::new_v4()));
+        soft_delete_to_trash(&path.to_string_lossy(), &bundle)?;
+        fs::remove_dir_all(&bundle).map_err(|e| format!("Session deleted; backup retained at {}: {e}", bundle.display()))
     }
 
     fn validate_resume(&self, session_id: &str, path: &str) -> Result<(), String> {

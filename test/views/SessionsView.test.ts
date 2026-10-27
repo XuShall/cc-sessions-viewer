@@ -131,40 +131,42 @@ const factory = (sessions: SessionMeta[] = [session()], props: Partial<Props> = 
   })
 
 describe('SessionsView', () => {
-  it('marks database-only Codex records as history-only and keeps browse/export without resume or file actions', async () => {
+  it('keeps database-only Codex records browsable and deletable without rename/resume', async () => {
     const target = session({ path: 'codex://original-id' })
     const wrapper = factory([target], { agent: 'codex' })
     expect(wrapper.find('.codex-special-tag').text()).toBe('History only')
     expect(wrapper.find('.codex-special-tag').attributes('aria-label')).toContain('cannot resume')
     expect(wrapper.find('.title-rename-ic').exists()).toBe(false)
-    expect(wrapper.find('.session-actions .danger').exists()).toBe(false)
-    // Background read, export, pin and sink remain; GUI chat, TUI and reveal do not.
-    expect(wrapper.findAll('.session-actions .icon-btn')).toHaveLength(4)
+    expect(wrapper.find('.session-actions .danger').exists()).toBe(true)
+    await wrapper.find('.session-actions .danger').trigger('click')
+    expect(wrapper.emitted('delete')?.[0]).toEqual([target])
+    // Background read, export, pin, sink and delete; no GUI chat, TUI or reveal.
+    expect(wrapper.findAll('.session-actions .icon-btn')).toHaveLength(5)
     await wrapper.find('.session-card').trigger('click')
     expect(wrapper.emitted('open')?.[0]).toEqual([target])
     expect(wrapper.emitted('resume')).toBeUndefined()
     expect(wrapper.emitted('chat')).toBeUndefined()
   })
 
-  it('keeps both resume modes for compressed Codex history but hides unsafe rename/delete', () => {
+  it('keeps both resume modes and complete deletion for compressed Codex history but hides rename', () => {
     const wrapper = factory([session({ path: '/sessions/rollout-id.jsonl.zst' })], { agent: 'codex' })
     expect(wrapper.find('.codex-special-tag').exists()).toBe(false)
     expect(wrapper.find('.title-rename-ic').exists()).toBe(false)
-    expect(wrapper.find('.session-actions .danger').exists()).toBe(false)
-    // Background read, GUI chat, TUI, reveal, export, pin and sink.
-    expect(wrapper.findAll('.session-actions .icon-btn')).toHaveLength(7)
+    expect(wrapper.find('.session-actions .danger').exists()).toBe(true)
+    // Background read, GUI chat, TUI, reveal, export, pin, sink and delete.
+    expect(wrapper.findAll('.session-actions .icon-btn')).toHaveLength(8)
   })
 
-  it('disables mixed batch deletion when a selected record is Codex-managed history', async () => {
+  it('allows batch deletion of Codex-managed history', async () => {
     const target = session({ path: 'codex://original-id' })
     const wrapper = factory([target], { agent: 'codex' })
     sessionSelectMode.value = true
     selectedSessions.value = new Set([target.path])
     await flushPromises()
     const remove = wrapper.find('.list-head .danger')
-    expect(remove.attributes('disabled')).toBeDefined()
+    expect(remove.attributes('disabled')).toBeUndefined()
     await remove.trigger('click')
-    expect(wrapper.emitted('batch-delete')).toBeUndefined()
+    expect(wrapper.emitted('batch-delete')).toHaveLength(1)
   })
 
   it('shows the project Git branch in the header action area', async () => {
@@ -247,6 +249,116 @@ describe('SessionsView', () => {
 
     it('keeps the project-empty state separate from the no-match state', () => {
       expect(factory([]).text()).toContain('No sessions in this project')
+    })
+  })
+
+  describe('search results after a session rename', () => {
+    it('updates the visible title immediately while the unchanged query is revalidated', async () => {
+      const original = session({ title: 'Fix login bug' })
+      const renamed = { ...original, title: 'Login issue resolved' }
+      let resolveRefresh!: (hits: SearchHit[]) => void
+      searchMock.mockResolvedValueOnce(toHits([original])).mockReturnValueOnce(new Promise<SearchHit[]>((resolve) => { resolveRefresh = resolve }))
+      const wrapper = factory([original])
+      sessionSearch.value = 'login'
+      await waitForSearchSettle()
+      await wrapper.find('.title-rename-ic').trigger('click')
+      expect(wrapper.emitted('rename')?.[0]).toEqual([original])
+
+      // App.confirmRename replaces this array after the backend save succeeds.
+      await wrapper.setProps({ sessions: [renamed] })
+      expect(wrapper.find('.session-title-text').text()).toBe(renamed.title)
+      expect(sessionSearch.value).toBe('login')
+      expect(searchMock).toHaveBeenCalledTimes(2)
+      resolveRefresh(toHits([renamed]))
+      await flushPromises()
+      expect(wrapper.find('.session-title-text').text()).toBe(renamed.title)
+    })
+
+    it('removes a title-only hit when the renamed session no longer matches', async () => {
+      const original = session({ title: 'Fix login bug' })
+      searchMock.mockResolvedValueOnce(toHits([original])).mockResolvedValueOnce([])
+      const wrapper = factory([original])
+      sessionSearch.value = 'login'
+      await waitForSearchSettle()
+      await wrapper.setProps({ sessions: [{ ...original, title: 'Payment issue' }] })
+      await flushPromises()
+      expect(searchMock).toHaveBeenCalledTimes(2)
+      expect(wrapper.findAll('.session-card')).toHaveLength(0)
+      expect(wrapper.text()).toContain('No sessions match')
+    })
+
+    it('keeps a renamed hit when its user-message body still matches the query', async () => {
+      const original = session({ title: 'Fix login bug' })
+      const renamed = { ...original, title: 'Investigation complete' }
+      searchMock.mockResolvedValueOnce(toHits([original])).mockResolvedValueOnce([
+        { ...toHits([renamed])[0], matchedField: 'text', snippet: 'The login screen is broken' },
+      ])
+      const wrapper = factory([original])
+      sessionSearch.value = 'login'
+      await waitForSearchSettle()
+      await wrapper.setProps({ sessions: [renamed] })
+      await flushPromises()
+      expect(wrapper.findAll('.session-card')).toHaveLength(1)
+      expect(wrapper.find('.session-title-text').text()).toBe(renamed.title)
+    })
+
+    it('refreshes renamed search hits outside the loaded session page', async () => {
+      const loaded = session({ path: '/loaded.jsonl', title: 'Loaded session' })
+      const original = session({ path: '/older.jsonl', title: 'Old login investigation' })
+      const renamed = { ...original, title: 'Older login issue resolved' }
+      searchMock.mockResolvedValueOnce(toHits([original])).mockResolvedValueOnce(toHits([renamed]))
+      const wrapper = factory([loaded], { sessionTotal: 100 })
+      sessionSearch.value = 'login'
+      await waitForSearchSettle()
+      // Mapping App's loaded page still produces a new array when the renamed
+      // search hit is not among its entries. Requery the backend, not just props.
+      await wrapper.setProps({ sessions: [{ ...loaded }] })
+      await flushPromises()
+      expect(searchMock).toHaveBeenCalledTimes(2)
+      expect(wrapper.find('.session-title-text').text()).toBe(renamed.title)
+    })
+
+    it('ignores an older search response that finishes after rename revalidation', async () => {
+      const original = session({ title: 'Fix login bug' })
+      const renamed = { ...original, title: 'Login issue resolved' }
+      let resolveOld!: (hits: SearchHit[]) => void
+      searchMock.mockReturnValueOnce(new Promise<SearchHit[]>((resolve) => { resolveOld = resolve }))
+        .mockResolvedValueOnce(toHits([renamed]))
+      const wrapper = factory([original])
+      sessionSearch.value = 'login'
+      await waitForSearchSettle()
+      await wrapper.setProps({ sessions: [renamed] })
+      await flushPromises()
+      resolveOld(toHits([original]))
+      await flushPromises()
+      expect(cancelMock).toHaveBeenCalledTimes(1)
+      expect(wrapper.find('.session-title-text').text()).toBe(renamed.title)
+    })
+
+    it('invalidates an in-flight response before a replacement query debounce expires', async () => {
+      const original = session({ title: 'Fix login bug' })
+      const payment = session({ path: '/payment.jsonl', title: 'Payment issue' })
+      let resolveOld!: (hits: SearchHit[]) => void
+      searchMock.mockReturnValueOnce(new Promise<SearchHit[]>((resolve) => { resolveOld = resolve }))
+        .mockResolvedValueOnce(toHits([payment]))
+      const wrapper = factory([original, payment])
+      sessionSearch.value = 'login'
+      await waitForSearchSettle()
+      sessionSearch.value = 'payment'
+      await flushPromises()
+      resolveOld(toHits([original]))
+      await flushPromises()
+      expect(wrapper.text()).not.toContain(original.title)
+      await waitForSearchSettle()
+      expect(wrapper.find('.session-title-text').text()).toBe(payment.title)
+    })
+
+    it('does not start a search on ordinary list updates without a search query', async () => {
+      const original = session()
+      const wrapper = factory([original])
+      await wrapper.setProps({ sessions: [{ ...original, title: 'New title' }] })
+      expect(wrapper.find('.session-title-text').text()).toBe('New title')
+      expect(searchMock).not.toHaveBeenCalled()
     })
   })
 

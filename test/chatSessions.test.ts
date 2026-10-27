@@ -531,6 +531,34 @@ describe('chatSessions Codex custom provider compatibility', () => {
     },
   )
 
+  it.each([false, true])('migrates retired GPT-5.5 before starting official/custom chat (custom=%s)', async (usesApiKey) => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'codex_runtime_info') return Promise.resolve({ usesApiKey, model: 'gpt-5.5' })
+      if (command === 'agent_chat_start') return Promise.resolve({ chatId: 55, processModel: 'codexAppServer' })
+      return Promise.resolve(undefined)
+    })
+    const s = await startChat({
+      agent: 'codex', projectKey: 'proj', cwd: '/tmp', title: 'Retired',
+      model: 'gpt-5.5', preloadMsgs: [{ role: 'assistant', sidechain: false, model: 'gpt-5.5', blocks: [] }],
+    })
+    expect(s.model).toBe('gpt-6.1-sol')
+    expect(s.lastModel).toBe('gpt-6.1-sol')
+    expect(invokeMock).toHaveBeenCalledWith('agent_chat_start', expect.objectContaining({ model: 'gpt-6.1-sol' }))
+  })
+
+  it('migrates a retired model left in a live tab before sending its next turn', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'codex_runtime_info') return Promise.resolve({ usesApiKey: false })
+      if (command === 'agent_chat_start') return Promise.resolve({ chatId: 56, processModel: 'oneShotResume' })
+      return Promise.resolve(undefined)
+    })
+    const s = await startChat({ agent: 'codex', projectKey: 'proj', cwd: '/tmp', title: 'Live migration' })
+    s.model = 'gpt-5.5'
+    await sendPrompt(s, 'next turn')
+    expect(s.model).toBe('gpt-6.1-sol')
+    expect(invokeMock).toHaveBeenCalledWith('agent_chat_send', expect.objectContaining({ model: 'gpt-6.1-sol' }))
+  })
+
   it('does not invent an official model when a custom provider has no configured or historical model', async () => {
     rememberChatGuiPreference('codex', { model: 'gpt-5.5' })
     invokeMock.mockImplementation((command: string) => {

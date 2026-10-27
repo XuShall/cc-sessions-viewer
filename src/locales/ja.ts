@@ -32,7 +32,7 @@ export default {
   'sidebar.more': 'その他',
   'sidebar.pricing': 'モデル料金（ライブ）',
   'pricing.title': 'モデル料金（ライブ）',
-  'pricing.subtitle': 'js-bridge を優先し、失敗時は models.dev にフォールバックします。日次キャッシュ；更新で最新を取得。',
+  'pricing.subtitle': 'js-bridge / models.dev の日次カタログ。USD 基本参考料金です。段階・ピーク時間・接続先で実際の料金は異なります。更新で最新を取得。',
   'pricing.openSource': '料金データソースをブラウザで開く',
   'pricing.refresh': '更新',
   'pricing.lastUpdated': '読み込み：{n} モデル',
@@ -52,6 +52,7 @@ export default {
   'pricing.family.grok': 'Grok Build / xAI',
   'pricing.family.agy': 'Antigravity / Gemini',
   'pricing.family.opencode': 'opencode',
+  'pricing.family.other': 'その他の公式プロバイダー（中国を含む）',
   'pricing.empty': '料金データがありません。',
   'pricing.searchPlaceholder': 'モデル検索 — Enter で確定',
   'pricing.filtered': '{n} 件一致',
@@ -959,7 +960,7 @@ export default {
   'list.codex.archived': 'アーカイブ済みセッション',
   'list.codex.historyOnly': '履歴のみ',
   'list.codex.historyOnlyHint': '元の Codex セッションファイルがありません。履歴の閲覧とエクスポートはできますが、再開はできません。',
-  'list.codex.managedHistoryHint': '圧縮・データベース履歴の名前変更や削除は Codex で行ってください。',
+  'list.codex.managedHistoryHint': '圧縮・データベース履歴の名前変更は Codex で行ってください。ここで削除するとセッション全体がゴミ箱に移動します。',
 
   'toast.sessionStatsComingSoon': 'セッション統計ページは間もなく公開予定',
 

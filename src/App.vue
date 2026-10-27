@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, onMounted, onUnmounted, watch, nextTick, provide, defineAsyncComponent } from 'vue'
 import type { Agent, ProjectInfo, SessionMeta, TrashItem, Msg, UsageSummary } from './types'
-import { agentLabel, agentSupports, sessionCanManageFile, sessionHistoryOnly } from './agentMeta'
+import { agentLabel, agentSupports, sessionCanDelete, sessionCanManageFile, sessionHistoryOnly } from './agentMeta'
 import * as api from './api'
 import { shortName } from './format'
 import { getProjectSearchShortcutTarget, isProjectEditorShortcut } from './projectEditor'
@@ -2589,7 +2589,7 @@ function restoreTarget(item: TrashItem): HTMLElement | null {
 function deleteSession(s: SessionMeta) {
   const fromChat = openSession.value?.path === s.path
   const deleteAgent = fromChat ? chatAgent.value : agent.value
-  if (!sessionCanManageFile(deleteAgent, s.path)) {
+  if (!sessionCanDelete(deleteAgent, s.path)) {
     notify(t('list.codex.managedHistoryHint'), true)
     return
   }
@@ -2770,7 +2770,7 @@ function batchDeleteSessions() {
   const keys = new Set(selectedSessions.value)
   const items = sessions.value.filter((s) => keys.has(s.path))
   if (!items.length) return
-  if (items.some(s => !sessionCanManageFile(agent.value, s.path))) {
+  if (items.some(s => !sessionCanDelete(agent.value, s.path))) {
     notify(t('list.codex.managedHistoryHint'), true)
     return
   }

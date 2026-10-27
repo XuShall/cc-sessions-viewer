@@ -4035,6 +4035,22 @@ mod tests {
     // ---- 交互式工具权限：control_request / can_use_tool → ChatEvent::Permission ----
 
     #[test]
+    fn opus_55_chat_preserves_model_effort_and_native_resume_without_thinking_overrides() {
+        let command = ClaudeSource.chat_command(Some("session-opus55"), "default", Some("claude-opus-5-5"), Some("max"), false).unwrap();
+        let args = command.args();
+        for (flag, value) in [("--model", "claude-opus-5-5"), ("--effort", "max"), ("--resume", "session-opus55")] {
+            let i = args.iter().position(|a| a == flag).unwrap();
+            assert_eq!(args[i + 1], value);
+        }
+        assert!(args.iter().all(|a| !a.contains("[1m]") && !a.contains("thinking")));
+        let line = r#"{"type":"assistant","message":{"id":"m-opus55","role":"assistant","model":"claude-opus-5-5","content":[{"type":"thinking","thinking":""},{"type":"text","text":"Working"},{"type":"tool_use","id":"tool-opus55","name":"Read","input":{"file_path":"test.txt"}}]},"session_id":"session-opus55"}"#;
+        let ChatEvent::Message(message) = parse_chat_line(line) else { panic!("assistant record must parse"); };
+        assert_eq!(message.model.as_deref(), Some("claude-opus-5-5"));
+        assert!(message.blocks.iter().any(|b| b.text.as_deref() == Some("Working")));
+        assert!(message.blocks.iter().any(|b| b.tool_id.as_deref() == Some("tool-opus55")));
+    }
+
+    #[test]
     fn chat_command_enables_stdio_permission_prompt() {
         // 没有这个 flag，被门控的工具不会发 can_use_tool 请求 —— GUI 弹框就无从触发。
         let cmd = ClaudeSource

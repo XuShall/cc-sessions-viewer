@@ -70,13 +70,14 @@ async function onRefresh() {
 onMounted(load)
 
 // 按 family 分桶 —— 后端已按 family、模型版本倒序排好，这里仅做分组。
-type Family = 'claude' | 'codex' | 'grok' | 'agy' | 'opencode'
+type Family = PricingEntry['family']
 const FAMILIES: { key: Family; icon: Component; label: string }[] = [
   { key: 'claude', icon: IconClaude, label: 'pricing.family.claude' },
   { key: 'codex', icon: IconCodex, label: 'pricing.family.codex' },
   { key: 'grok', icon: IconGrok, label: 'pricing.family.grok' },
   { key: 'agy', icon: IconAgy, label: 'pricing.family.agy' },
   { key: 'opencode', icon: IconOpencode, label: 'pricing.family.opencode' },
+  { key: 'other', icon: IconPriceTag, label: 'pricing.family.other' },
 ]
 // 价格页是完整的参考价格表，不受设置中 agent 显隐影响。
 const pricingFamilies = FAMILIES
@@ -105,6 +106,7 @@ const grouped = computed(() => {
     grok: [],
     agy: [],
     opencode: [],
+    other: [],
   }
   for (const e of filtered.value) {
     if (e.family in map) map[e.family].push(e)
@@ -150,6 +152,7 @@ const sectionEls = ref<Record<Family, HTMLElement | null>>({
   grok: null,
   agy: null,
   opencode: null,
+  other: null,
 })
 const activeFamily = ref<Family>('claude')
 

@@ -129,9 +129,15 @@ export function sessionHistoryOnly(agent: Agent, path: string): boolean {
   return agent === 'codex' && path.startsWith('codex://')
 }
 
-/** Never partially rewrite compressed or database-owned Codex history. */
+/** Rename still requires a writable native rollout. Deletion is separate:
+ * Codex's trash adapter now snapshots the entire session, including DB rows. */
 export function sessionCanManageFile(agent: Agent, path: string): boolean {
   return agent !== 'codex' || (!sessionHistoryOnly(agent, path) && !path.endsWith('.jsonl.zst'))
+}
+
+export function sessionCanDelete(agent: Agent, path: string): boolean {
+  if (!path) return false
+  return agent !== 'codex' || sessionHistoryOnly(agent, path) || /\.jsonl(?:\.zst)?$/.test(path)
 }
 
 export function agentLabel(agent: Agent, long = false): string {

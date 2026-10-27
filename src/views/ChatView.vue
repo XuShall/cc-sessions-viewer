@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, defin
 import type { DirectiveBinding } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import type { Agent, Msg, SessionMeta, Block, ChatQuestionRequest, PiTreeNode } from '../types'
-import { agentLabel, sessionCanManageFile, sessionHistoryOnly } from '../agentMeta'
+import { agentLabel, sessionCanDelete, sessionCanManageFile, sessionHistoryOnly } from '../agentMeta'
 import { renderText, renderTextUncached, displaySessionId, formatTime, formatElapsedSeconds, historicalMessageExecutionMs, isCaveatOnlyMsg, isAskUserQuestionInstructionOnlyMsg, parseSystemEvent, cleanMetaText, metaKindIsPre, parseMetaFields, parseTeammateMessage, parseFileRef } from '../format'
 import type { MetaField } from '../format'
 import { prettifyAndHighlightJson } from '../jsonHighlight'
@@ -2757,7 +2757,7 @@ function onDocClick(e: MouseEvent) {
     </div>
     <!-- 删除：read 与 live chat 两种模式都有（chat 里删 = 软删并停掉当前会话）。 -->
     <button
-      v-if="!trashed && canManageFile"
+      v-if="!trashed && sessionCanDelete(agent, session.path)"
       class="icon-btn danger"
       v-tooltip="t('chat.action.delete')"
       @click="$emit('delete')"

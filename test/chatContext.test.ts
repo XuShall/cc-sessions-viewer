@@ -35,6 +35,14 @@ describe('chatContext', () => {
     expect(contextWindowFor('claude', undefined)).toBe(200_000)
   })
 
+  it('Opus 5.5 uses its standard 1M window from the first turn without adding a credits flag', () => {
+    expect(contextWindowFor('claude', 'claude-opus-5-5', 50_000)).toBe(1_000_000)
+    expect(contextWindowFor('claude', 'claude-opus-5-5-20260922')).toBe(1_000_000)
+    expect(contextPercent(50_000, contextWindowFor('claude', 'claude-opus-5-5'))).toBe(5)
+    // An alias can point at a third-party endpoint; do not infer its window.
+    expect(contextWindowFor('claude', 'opus')).toBe(200_000)
+  })
+
   it('contextWindowFor：占用 > 200k 反推 1M（从 TUI 1M 续聊的种子值）', () => {
     // 标准 200k 装不下 366k，只可能是 1M 窗口；model 字段不带 [1m] 标记时靠占用反推。
     expect(contextWindowFor('claude', 'claude-opus-4-8', 366_824)).toBe(1_000_000)

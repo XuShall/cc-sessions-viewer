@@ -2,7 +2,7 @@ use super::super::{discover_sessions_in, read_in, session_page_in, CodexSource};
 use super::*;
 use crate::agents::SessionSource;
 use serde_json::json;
-use std::io::Read;
+use std::io::{Read, Write};
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -503,6 +503,108 @@ fn search_prefilter_reads_unicode_user_text_from_compressed_and_database_storage
         "codex://db-search",
         "stored answer"
     ));
+}
+
+#[test]
+fn complete_trash_roundtrips_raw_compressed_and_database_only_sessions() {
+    use super::super::trash_storage::{delete, preview, restore};
+    for kind in ["raw", "zipped", "database", "raw-and-zipped", "legacy"] {
+        let f = Fixture::new();
+        let raw = f.thread("target", false, false);
+        let untouched = f.thread("untouched", false, false);
+        f.rollout(&untouched, "untouched", false);
+        let mut originals = Vec::new();
+        if matches!(kind, "raw" | "raw-and-zipped" | "legacy") {
+            originals.push(f.rollout(&raw, "target", false));
+        }
+        if matches!(kind, "zipped" | "raw-and-zipped") {
+            originals.push(f.rollout(&raw, "target", true));
+        }
+        if kind != "legacy" { f.project("target", &[user("u", "recover me"), agent("a")]); }
+        f.project("untouched", &[user("u", "keep me")]);
+        let state = f.state();
+        state.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE thread_attachments(thread_id TEXT, payload BLOB); INSERT INTO thread_attachments VALUES('target', X'00ff10'); INSERT INTO thread_attachments VALUES('untouched', X'12'); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT, child_thread_id TEXT); INSERT INTO thread_spawn_edges VALUES('untouched','target');").unwrap();
+        f.history().execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT); INSERT INTO thread_turns VALUES('target','turn'); CREATE TABLE thread_realtime_items(thread_id TEXT, item_id TEXT); INSERT INTO thread_realtime_items VALUES('target','realtime');").unwrap();
+        let index = "{\"id\":\"untouched\",\"thread_name\":\"Keep\"}\n{\"id\":\"target\",\"thread_name\":\"Saved title\"}\n";
+        fs::write(f.0.join("session_index.jsonl"), index).unwrap();
+        fs::write(f.0.join("history.jsonl"), "{\"session_id\":\"target\",\"text\":\"prompt\"}\n{\"session_id\":\"untouched\"}\n").unwrap();
+        let bytes: Vec<_> = originals.iter().map(|p| fs::read(p).unwrap()).collect();
+        let path = if kind == "database" { "codex://target".into() } else { originals[0].to_string_lossy().into_owned() };
+        let bundle = f.0.join("trash-test");
+        delete(&f.0, &path, &bundle).unwrap();
+        assert!(originals.iter().all(|p| !p.exists()), "{kind}");
+        assert!(discover_sessions_in(&f.0, false, false).unwrap().iter().all(|s| s.meta.id != "target"));
+        assert_eq!(threads(&f.0).unwrap().len(), 1);
+        assert_eq!(state.query_row("SELECT COUNT(*) FROM thread_attachments WHERE thread_id='target'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert!(!fs::read_to_string(f.0.join("history.jsonl")).unwrap().contains("target"));
+        let (title, messages) = preview(&bundle.join("session.jsonl")).unwrap().unwrap();
+        assert_eq!(title, "Saved title");
+        assert!(!messages.is_empty());
+        assert_eq!(CodexSource.read_session(&bundle.join("session.jsonl").to_string_lossy()).unwrap().len(), messages.len());
+        // Changes to other sessions while this one is in trash must survive.
+        state.execute("UPDATE threads SET title='Changed elsewhere' WHERE id='untouched'", []).unwrap();
+        fs::OpenOptions::new().append(true).open(f.0.join("session_index.jsonl")).unwrap().write_all(b"{\"id\":\"third\",\"thread_name\":\"New entry\"}\n").unwrap();
+        restore(&f.0, &bundle).unwrap();
+        for (path, before) in originals.iter().zip(&bytes) { assert_eq!(&fs::read(path).unwrap(), before, "{kind}"); }
+        assert_eq!(threads(&f.0).unwrap().len(), 2);
+        assert_eq!(state.query_row("SELECT payload FROM thread_attachments WHERE thread_id='target'", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), vec![0,255,16]);
+        assert_eq!(state.query_row("SELECT title FROM threads WHERE id='untouched'", [], |r| r.get::<_, String>(0)).unwrap(), "Changed elsewhere");
+        assert!(fs::read_to_string(f.0.join("session_index.jsonl")).unwrap().contains("third"));
+        if kind != "legacy" { assert_eq!(read_history(&f.0, "target").unwrap().len(), 2); }
+        assert!(restore(&f.0, &bundle).is_err(), "must never overwrite an existing session");
+    }
+}
+
+#[test]
+fn complete_trash_rolls_back_on_database_failure_and_keeps_restore_conflicts_recoverable() {
+    use super::super::trash_storage::{delete, restore};
+    let f = Fixture::new();
+    let raw = f.thread("target", false, false);
+    f.rollout(&raw, "target", false);
+    f.project("target", &[user("u", "protected")]);
+    let state = f.state();
+    state.execute_batch("CREATE TRIGGER refuse_delete BEFORE DELETE ON threads BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+    let bundle = f.0.join("trash-test");
+    assert!(delete(&f.0, raw.to_str().unwrap(), &bundle).is_err());
+    assert!(raw.exists());
+    assert!(!bundle.exists());
+    assert_eq!(read_history(&f.0, "target").unwrap().len(), 1);
+    state.execute_batch("DROP TRIGGER refuse_delete;").unwrap();
+    delete(&f.0, raw.to_str().unwrap(), &bundle).unwrap();
+    fs::write(&raw, b"a new rollout").unwrap();
+    assert!(restore(&f.0, &bundle).is_err());
+    assert_eq!(fs::read(&raw).unwrap(), b"a new rollout");
+    assert!(bundle.join("manifest.json").exists());
+    fs::remove_file(&raw).unwrap();
+    state.execute_batch("CREATE TRIGGER refuse_insert BEFORE INSERT ON threads BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+    assert!(restore(&f.0, &bundle).is_err());
+    assert!(!raw.exists());
+    assert!(threads(&f.0).unwrap().is_empty());
+    state.execute_batch("DROP TRIGGER refuse_insert;").unwrap();
+    fs::write(f.0.join("state_6.sqlite"), b"new schema").unwrap();
+    assert!(restore(&f.0, &bundle).unwrap_err().contains("schema changed"));
+    fs::remove_file(f.0.join("state_6.sqlite")).unwrap();
+    restore(&f.0, &bundle).unwrap();
+    assert!(raw.exists());
+}
+
+#[test]
+fn complete_trash_rejects_outside_paths_and_corrupted_backups() {
+    use super::super::trash_storage::{delete, restore};
+    let f = Fixture::new();
+    let outside = f.0.join("outside.jsonl");
+    f.rollout(&outside, "outside", false);
+    assert!(delete(&f.0, outside.to_str().unwrap(), &f.0.join("bad")).is_err());
+    assert!(outside.exists());
+    let raw = f.thread("target", false, false);
+    f.rollout(&raw, "target", true);
+    f.project("target", &[user("u", "protected")]);
+    let bundle = f.0.join("trash-test");
+    delete(&f.0, "codex://target", &bundle).unwrap();
+    let zipped = PathBuf::from(format!("{}.zst", raw.strip_prefix(&f.0).unwrap().display()));
+    fs::write(bundle.join(zipped), b"corrupt").unwrap();
+    assert!(restore(&f.0, &bundle).unwrap_err().contains("corrupted"));
+    assert!(threads(&f.0).unwrap().is_empty());
 }
 
 #[test]

@@ -67,13 +67,13 @@ export const CHAT_MODEL_MENU: Record<Agent, ModelMenuConfig> = {
     unavailable: [],
     primary: [
       { value: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' },
+      { value: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
       { value: 'gpt-6-sol', label: 'GPT-6-Sol' },
       { value: 'gpt-6-astra', label: 'GPT-6-Astra' },
       { value: 'gpt-6-luna', label: 'GPT-6-Luna' },
       { value: 'gpt-5.6-terra', label: 'GPT-5.6-Terra' },
       { value: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' },
       { value: 'gpt-5.6-luna', label: 'GPT-5.6-Luna' },
-      { value: 'gpt-5.5', label: 'GPT-5.5' },
     ],
     // 模型 ID 与 OpenAI 官方 Codex/API 模型目录保持一致。
     // 5.4 系列与 5.3-codex-spark 均已被 Codex 下架（spark 连字符串都不在 CLI 二进制里了），
@@ -122,7 +122,7 @@ export function modelMenuFor(agent: Agent, opts: ModelMenuOptions = {}): ModelMe
   if (agent === 'codex') {
     const configured = opts.codexConfiguredModel?.trim()
     const menu = CHAT_MODEL_MENU.codex
-    if (configured && ![...menu.primary, ...menu.more].some((m) => m.value === configured)) {
+    if (configured && !isRetiredCodexModel(configured) && ![...menu.primary, ...menu.more].some((m) => m.value === configured)) {
       // Codex has no Claude-style alias mapping. Keep the configured request ID
       // intact rather than inventing a GPT alias for a third-party model.
       return {
@@ -212,7 +212,7 @@ const ULTRACODE_MODELS = new Set(['claude-fable-5-1', 'claude-fable-5', 'claude-
 const CODEX_MAX_MODELS = new Set(['gpt-6-luna', 'gpt-5.6-luna'])
 
 /** Codex GPT-6 flagship models and 5.6 Sol/Terra: base + max + ultra */
-const CODEX_ULTRA_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra'])
+const CODEX_ULTRA_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-5.6-sol', 'gpt-5.6-terra'])
 
 export function effortLevelsFor(agent: Agent, model: string | undefined): string[] {
   const base = CHAT_EFFORT_LEVELS[agent]
@@ -280,7 +280,11 @@ export function fallbackEffort(
 
 /** 该 agent 的初始模型（= 主列表第一项；无则 undefined）。用户要求「不存在 default model」，
  *  故每个会话都以一个明确模型起步。 */
-const CODEX_DEFAULT_MODEL = 'gpt-5.5'
+const CODEX_DEFAULT_MODEL = 'gpt-6.1-sol'
+
+export function isRetiredCodexModel(model: string | undefined): boolean {
+  return model === 'gpt-5.5'
+}
 
 export function defaultModel(agent: Agent): string | undefined {
   if (agent === 'claude') return undefined
@@ -297,7 +301,7 @@ function knownModelValues(agent: Agent): Set<string> {
 
 /**
  * 会话记忆的模型可能来自旧数据、已不在当前菜单里（如 `gpt-5.3-codex`）。这时别把会话停在
- * 一个不存在的模型上 —— 回退到该 agent 的兜底：codex → gpt-5.5（= defaultModel），
+ * 一个不存在的模型上 —— 回退到该 agent 的兜底：codex → gpt-6.1-sol（= defaultModel），
  * claude → opus-5-5。model 为空则原样返回，交给上层的 `?? defaultModel(agent)` 处理。
  */
 export function sanitizeModel(agent: Agent, model: string | undefined): string | undefined {

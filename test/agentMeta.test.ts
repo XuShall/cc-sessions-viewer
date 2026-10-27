@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AGENT_META, agentLabel, agentSupports, sessionCanManageFile, sessionHistoryOnly } from '../src/agentMeta'
+import { AGENT_META, agentLabel, agentSupports, sessionCanDelete, sessionCanManageFile, sessionHistoryOnly } from '../src/agentMeta'
 
 describe('agent metadata', () => {
   it('distinguishes readable projected Codex history from natively resumable rollouts', () => {
@@ -11,6 +11,15 @@ describe('agent metadata', () => {
     expect(sessionCanManageFile('codex', '/sessions/rollout-id.jsonl.zst')).toBe(false)
     expect(sessionCanManageFile('codex', '/sessions/rollout-id.jsonl')).toBe(true)
     expect(sessionCanManageFile('agy', '/logs/transcript_full.jsonl')).toBe(true)
+  })
+
+  it('allows complete deletion of every Codex storage format independently of rename/resume', () => {
+    for (const path of ['codex://original-id', '/sessions/rollout-id.jsonl.zst', '/sessions/rollout-id.jsonl']) {
+      expect(sessionCanDelete('codex', path)).toBe(true)
+    }
+    expect(sessionCanDelete('codex', '')).toBe(false)
+    expect(sessionCanDelete('codex', '/tmp/config.toml')).toBe(false)
+    expect(sessionCanDelete('opencode', 'opencode://id')).toBe(true)
   })
 
   it('defines Grok Build as history-capable but never GUI-chat-capable', () => {

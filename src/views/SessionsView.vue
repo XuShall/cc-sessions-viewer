@@ -47,7 +47,7 @@ import NewMenu from '../components/NewMenu.vue'
 import GitBranchControl from '../components/GitBranchControl.vue'
 import { PaneActionsKey } from '../paneActions'
 import { chatSupported } from '../chatComposerOptions'
-import { agentSupports, sessionCanManageFile, sessionHistoryOnly } from '../agentMeta'
+import { agentSupports, sessionCanDelete, sessionCanManageFile, sessionHistoryOnly } from '../agentMeta'
 
 const pa = inject(PaneActionsKey)!
 
@@ -135,6 +135,9 @@ let searchReqSeq = 0
 let searchInFlight = false
 
 function abortInFlightSearch() {
+  // Invalidate immediately, including the gap before the next debounce fires.
+  // Cancellation is best-effort: an old IPC response may still arrive.
+  ++searchReqSeq
   if (!searchInFlight) return
   searchInFlight = false
   cancelSearch().catch(() => {})
@@ -172,23 +175,33 @@ async function runProjectSearch(query: string) {
   }
 }
 
-// 关键词变化：每次新输入立刻打断在跑的搜索（fiber 风格），等防抖窗口稳定再发新请求。
+function scheduleProjectSearch(delay = SEARCH_DEBOUNCE_MS) {
+  window.clearTimeout(searchDebounceTimer)
+  abortInFlightSearch()
+  const query = sessionSearch.value.trim()
+  if (query.length < SEARCH_MIN_LEN) {
+    searchHits.value = []
+    searching.value = false
+    return
+  }
+  searching.value = true
+  if (delay === 0) void runProjectSearch(query)
+  else searchDebounceTimer = window.setTimeout(() => runProjectSearch(query), delay)
+}
+
+// 输入防抖；改名 / 手动刷新后的数据更新不必再等防抖。
+watch(sessionSearch, () => scheduleProjectSearch())
 watch(
-  sessionSearch,
-  (q) => {
-    window.clearTimeout(searchDebounceTimer)
-    abortInFlightSearch()
-    if (q.trim().length < SEARCH_MIN_LEN) {
-      searchHits.value = []
-      searching.value = false
-      return
-    }
-    searching.value = true
-    searchDebounceTimer = window.setTimeout(() => {
-      runProjectSearch(q)
-    }, SEARCH_DEBOUNCE_MS)
+  () => props.sessions,
+  (sessions) => {
+    if (sessionSearch.value.trim().length < SEARCH_MIN_LEN) return
+    // App.confirmRename replaces the loaded list after saving. Patch known
+    // hits immediately, but do not filter by title: the body may still match.
+    const byPath = new Map(sessions.map((session) => [session.path, session]))
+    searchHits.value = searchHits.value.map((hit) => byPath.get(hit.path) ?? hit)
+    // Also covers hits outside the loaded page and changed match membership.
+    scheduleProjectSearch(0)
   },
-  { immediate: false },
 )
 
 // 切项目（dirName 变化）→ 清搜索结果；防抖里读的是更新后的 props
@@ -462,7 +475,7 @@ function codexRankLabel(s: SessionMeta): string {
 }
 
 const selectedIncludesManagedHistory = computed(() => visibleSessions.value.some(
-  s => selectedSessions.value.has(s.path) && !sessionCanManageFile(props.agent, s.path),
+  s => selectedSessions.value.has(s.path) && !sessionCanDelete(props.agent, s.path),
 ))
 
 function codexSpecialLabel(s: SessionMeta): string {
@@ -1050,7 +1063,7 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
           <IconPinDown />
         </button>
         <button
-          v-if="sessionCanManageFile(agent, s.path)"
+          v-if="sessionCanDelete(agent, s.path)"
           class="icon-btn danger"
           v-tooltip="t('list.action.trash')"
           @click.stop="emit('delete', s)"

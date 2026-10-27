@@ -73,6 +73,30 @@ describe('PricingView Grok family', () => {
     }
   })
 
+  it('renders and searches provider-qualified official models without mixing regional rates', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'pricing_status') return Promise.resolve({ loaded: true, fetching: false, lastError: null, modelCount: 2 })
+      if (command === 'list_pricing') return Promise.resolve([
+        { name: 'moonshotai/kimi-k3.1-pro', family: 'other', input: 2e-6, output: 10e-6, cacheWrite: 0, cacheRead: 0.2e-6, context: 1_048_576 },
+        { name: 'minimax/MiniMax-M3.1-Flash', family: 'other', input: 0.15e-6, output: 0.6e-6, cacheWrite: 0, cacheRead: 0.015e-6, context: 1_000_000 },
+      ])
+      return Promise.resolve(undefined)
+    })
+    const wrapper = mount(PricingView, { global: { directives: { tooltip: vTooltip } } })
+    try {
+      await flushPromises()
+      expect(wrapper.findAll('.pricing-family').some(section => section.text().includes('Other official providers'))).toBe(true)
+      const row = wrapper.findAll('.pricing-row').find(row => row.text().includes('moonshotai/kimi-k3.1-pro'))
+      expect(row?.text()).toContain('$2.00')
+      const input = wrapper.find('input')
+      await input.setValue('MiniMax-M3.1')
+      await input.trigger('keydown', { key: 'Enter' })
+      expect(wrapper.text()).toContain('minimax/MiniMax-M3.1-Flash')
+      expect(wrapper.text()).not.toContain('moonshotai/kimi-k3.1-pro')
+      expect(wrapper.text()).toContain('Base USD reference rates')
+    } finally { wrapper.unmount() }
+  })
+
   it('renders the xAI family, Grok Build icon anchor, and model pricing row when Grok is hidden', async () => {
     const originalAgents = { ...enabledAgents.value }
     enabledAgents.value = { ...enabledAgents.value, grok: false }

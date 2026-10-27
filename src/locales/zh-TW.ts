@@ -32,7 +32,7 @@ export default {
   'sidebar.more': '更多',
   'sidebar.pricing': '模型即時價格',
   'pricing.title': '模型即時價格',
-  'pricing.subtitle': '價格優先來自 js-bridge，異常時回退 models.dev；每日快取，點重新整理可立即取得最新資料。',
+  'pricing.subtitle': 'js-bridge / models.dev 每日更新；美元基礎參考價，級距、尖離峰及渠道實際帳單可能不同。重新整理取得最新目錄。',
   'pricing.openSource': '在瀏覽器開啟價格資料來源',
   'pricing.refresh': '重新整理',
   'pricing.lastUpdated': '已載入：{n} 個模型',
@@ -52,6 +52,7 @@ export default {
   'pricing.family.grok': 'Grok Build / xAI',
   'pricing.family.agy': 'Antigravity / Gemini',
   'pricing.family.opencode': 'opencode',
+  'pricing.family.other': '其他官方供應商（含中國模型）',
   'pricing.empty': '暫無價格資料。',
   'pricing.searchPlaceholder': '搜尋模型 — Enter 確認',
   'pricing.filtered': '符合 {n} 筆',
@@ -951,7 +952,7 @@ export default {
   'list.codex.archived': '已封存會話',
   'list.codex.historyOnly': '僅可查看歷史',
   'list.codex.historyOnlyHint': '原始 Codex 會話檔案已缺失，仍可查看及匯出歷史，但無法繼續會話。',
-  'list.codex.managedHistoryHint': '此壓縮或資料庫歷史由 Codex 管理，請在 Codex 中重新命名或刪除。',
+  'list.codex.managedHistoryHint': '此壓縮或資料庫歷史需在 Codex 中重新命名；在此刪除會將完整會話移入回收站。',
 
   'toast.sessionStatsComingSoon': '會話統計頁面開發中 —— 即將在本版本上線',
 

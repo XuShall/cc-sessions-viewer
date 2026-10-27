@@ -1222,6 +1222,18 @@ mod codex_side_tests {
     }
 
     #[test]
+    fn terra_61_preserves_model_and_ultra_for_thread_and_turn_requests() {
+        let thread = codex_thread_params("/workspace/app", "fullAccess", Some("gpt-6.1-terra"), Some("ultra"), false);
+        let turn = codex_turn_params("thread-id", "hello", &[], "fullAccess", Some("gpt-6.1-terra"), Some("ultra"));
+        for params in [&thread, &turn] {
+            assert_eq!(params["model"], "gpt-6.1-terra");
+            assert_eq!(params["collaborationMode"]["settings"]["model"], "gpt-6.1-terra");
+            assert_eq!(params["collaborationMode"]["settings"]["reasoning_effort"], "ultra");
+        }
+        assert_eq!(turn["effort"], "ultra");
+    }
+
+    #[test]
     fn non_plan_turn_params_clear_collaboration_mode_to_default() {
         let turn = codex_turn_params(
             "thread-id",

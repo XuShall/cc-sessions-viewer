@@ -25,19 +25,25 @@ describe('chatGuiPreferences', () => {
     expect(rememberedChatEffort('codex', 'gpt-5.6-sol')).toBe('ultra')
   })
 
+  it('migrates saved GPT-5.5 to the current Codex default while preserving effort', () => {
+    localStorage.setItem('chatGuiPrefs:v1', JSON.stringify({ codex: { model: 'gpt-5.5', effort: 'xhigh' } }))
+    expect(rememberedChatModel('codex')).toBe('gpt-6.1-sol')
+    expect(rememberedChatEffort('codex', 'gpt-6.1-sol')).toBe('xhigh')
+  })
+
   it('falls back to safe defaults when stored values are invalid', () => {
     localStorage.setItem('chatGuiPrefs:v1', JSON.stringify({
       codex: {
         permissionMode: 'bypassPermissions',
         model: 'missing-model',
-        effort: 'ultra',
+        effort: 'not-a-level',
       },
     }))
 
     expect(readChatGuiPreference('codex')).toEqual({
-      model: 'gpt-5.5',
+      model: 'gpt-6.1-sol',
     })
     expect(rememberedChatPermissionMode('codex')).toBe('fullAccess')
-    expect(rememberedChatEffort('codex', 'gpt-5.5')).toBeUndefined()
+    expect(rememberedChatEffort('codex', 'gpt-6.1-sol')).toBeUndefined()
   })
 })

@@ -182,6 +182,30 @@ fn soft_delete_in(
     fs::create_dir_all(directory)
         .map_err(|error| format!("Failed to create trash directory: {error}"))?;
 
+    if agent == "codex" {
+        let trash_name = unique_trash_name(directory, "codex-session");
+        let destination = directory.join(&trash_name);
+        let meta_path = directory.join(format!("{trash_name}.meta"));
+        // Install recovery metadata before touching any Codex storage. The
+        // bundle contains both original rollouts and database rows; session.jsonl
+        // is a lossless message preview, not a replacement native rollout.
+        write_meta(&meta_path, &serde_json::json!({
+            "agent": agent,
+            "originalPath": path,
+            "originalRootPath": path,
+            "entryRelativePath": "session.jsonl",
+            "storageKind": "directory",
+            "codexBundleVersion": 1,
+            "projectLabel": project_label,
+            "deletedAt": now_millis(),
+        }))?;
+        if let Err(error) = agents::codex::soft_delete_to_trash(path, &destination) {
+            if !destination.exists() { let _ = fs::remove_file(meta_path); }
+            return Err(error);
+        }
+        return Ok(());
+    }
+
     if agent == "opencode" && agents::opencode::is_virtual_path(path) {
         let session_id = path.trim_start_matches("opencode://");
         let base = if session_id.is_empty() {
@@ -415,6 +439,12 @@ fn restore_in(directory: &Path, trash_file: &str) -> Result<(), String> {
         .get("agent")
         .and_then(Value::as_str)
         .unwrap_or("claude");
+    if agent == "codex" && meta.get("codexBundleVersion").and_then(Value::as_u64) == Some(1) {
+        agents::codex::restore_from_trash(&source_path)?;
+        fs::remove_dir_all(&source_path).map_err(|e| format!("Restored Codex session; failed to remove backup: {e}"))?;
+        let _ = fs::remove_file(&meta_path);
+        return Ok(());
+    }
     if agent == "opencode" && agents::opencode::is_virtual_path(original_path) {
         agents::opencode::restore_from_trash(&source_path)?;
         let _ = fs::remove_file(&source_path);

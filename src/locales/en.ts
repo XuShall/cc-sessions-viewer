@@ -32,7 +32,7 @@ export default {
   'sidebar.more': 'More',
   'sidebar.pricing': 'Live model pricing',
   'pricing.title': 'Live model pricing',
-  'pricing.subtitle': 'Live rates from js-bridge, with models.dev fallback. Updated daily; click refresh to pull now.',
+  'pricing.subtitle': 'Daily js-bridge / models.dev catalog. Base USD reference rates; tiers, peak hours and endpoints may differ. Refresh for the latest.',
   'pricing.openSource': 'Open pricing source in browser',
   'pricing.refresh': 'Refresh',
   'pricing.lastUpdated': 'Loaded: {n} models',
@@ -52,6 +52,7 @@ export default {
   'pricing.family.grok': 'Grok Build / xAI',
   'pricing.family.agy': 'Antigravity / Gemini',
   'pricing.family.opencode': 'opencode',
+  'pricing.family.other': 'Other official providers (including China)',
   'pricing.empty': 'No pricing data available.',
   'pricing.searchPlaceholder': 'Search models — press Enter',
   'pricing.filtered': '{n} matches',
@@ -963,7 +964,7 @@ export default {
   'list.codex.archived': 'Archived session',
   'list.codex.historyOnly': 'History only',
   'list.codex.historyOnlyHint': 'The original Codex session file is missing. You can view and export this history, but cannot resume it.',
-  'list.codex.managedHistoryHint': 'Manage this compressed or database-backed history in Codex to rename or delete it.',
+  'list.codex.managedHistoryHint': 'Rename this compressed or database-backed history in Codex. Deleting here moves the complete session to Trash.',
 
   // ---------- Stats dashboard ----------
   'stats.title': 'Statistics',

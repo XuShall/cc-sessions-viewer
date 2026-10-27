@@ -20,6 +20,7 @@ export function usedContextTokens(u: UsageSummary | undefined | null): number {
  * 模型 → 上下文窗口大小（近似，前端维护；headless stream 不含 modelContextWindow）。
  * - 含 `[1m]` 标记 → 1M（Claude 1M beta）。
  * - codex → 1M（其 gpt-5.x 默认大窗口，用户 config 多为 1_000_000）。
+ * - 显式 Opus 5.5（含日期 pin）→ 官方标准 1M，无需添加会触发额外计费的 [1m]。
  * - 其余 claude → 200k；但若实际占用已 > 200k（只可能是 1M 窗口，标准 200k 装不下，
  *   常见于从 TUI 1M 会话续聊过来的种子值），按 1M 算，避免角标封顶在 100% 误导。
  *   transcript 的 model 字段不带 `[1m]` 标记，所以 1M 只能从占用量反推。
@@ -32,6 +33,7 @@ export function contextWindowFor(
   const m = (model || '').toLowerCase()
   if (m.includes('[1m]')) return 1_000_000
   if (agent === 'codex') return 1_000_000
+  if (agent === 'claude' && /^claude-opus-5-5(?:-\d{8})?$/.test(m)) return 1_000_000
   if (agent === 'claude' && /^(opus|sonnet|fable)$/.test(m) && used > 200_000) return 1_000_000
   if (used > 200_000) return 1_000_000
   return 200_000

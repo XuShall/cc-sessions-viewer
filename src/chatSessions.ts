@@ -14,7 +14,7 @@
 import { reactive, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import * as api from './api'
-import { defaultModel, defaultEffort, defaultPermissionMode, effectiveEffort, sanitizeModel } from './chatComposerOptions'
+import { defaultModel, defaultEffort, defaultPermissionMode, effectiveEffort, isRetiredCodexModel, sanitizeModel } from './chatComposerOptions'
 import {
   rememberedChatEffort,
   rememberedChatModel,
@@ -211,7 +211,8 @@ function initialChatModel(opts: StartChatOptions, codexRuntime: CodexRuntimeInfo
     // global config is authoritative, even when reopening an older transcript.
     // Never sanitize a third-party model through the official GPT-only menu.
     const configuredModel = codexRuntime.model?.trim() || undefined
-    return model ?? configuredModel ?? historicalModel
+    const candidate = model ?? configuredModel ?? historicalModel
+    return isRetiredCodexModel(candidate) ? defaultModel(agent) : candidate
   }
   return sanitizeModel(agent, model ?? historicalModel ?? rememberedChatModel(agent)) ?? defaultModel(agent)
 }
@@ -227,7 +228,10 @@ function initialLastModel(
   codexRuntime: CodexRuntimeInfo | null,
 ): string | undefined {
   const model = lastAssistantModel(preloadMsgs)
-  if (agent === 'codex' && codexRuntime?.usesApiKey) return codexRuntime.model || model
+  if (agent === 'codex' && codexRuntime?.usesApiKey) {
+    const candidate = codexRuntime.model || model
+    return isRetiredCodexModel(candidate) ? defaultModel(agent) : candidate
+  }
   return sanitizeModel(agent, model)
 }
 
@@ -1284,6 +1288,11 @@ export async function sendPrompt(
   if (!trimmed && images.length === 0 && files.length === 0) return false
   if (session.status === 'exited' || session.status === 'error') {
     return false
+  }
+  // A tab kept alive across an upgrade may still hold the retired model in
+  // memory. Migrate before restart detection so no new turn uses GPT-5.5.
+  if (session.agent === 'codex' && isRetiredCodexModel(session.model)) {
+    session.model = defaultModel('codex')
   }
   if (session.chatId === null && !(await resumeParkedChat(session))) return false
 
