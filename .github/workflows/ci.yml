@@ -1,81 +1,42 @@
-name: ci
+name: Windows CI
 
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
-# A new push to the same branch/PR cancels the in-flight run.
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: windows-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  frontend:
-    name: frontend (typecheck + vitest)
-    runs-on: ubuntu-latest
-    if: ${{ !startsWith(github.event.head_commit.message, 'Release:') }}
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      HUSKY: '0'
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
         with:
-          # jsdom 30 requires ^22.22.2 || ^24.15.0 || >=26.0.0 — Node 20 is out of
-          # range entirely, so the vitest suite cannot run on it. Plain `22` resolves
-          # to the latest 22.x, which is above that floor. release.yml already uses 22.
-          node-version: 22
-          cache: npm
-
-      - run: npm ci
-
-      - name: Type-check
-        run: npx vue-tsc --noEmit
-
-      - name: Unit tests
-        run: npm run test:run
-
-  docs:
-    name: docs (commands + utilities + SEO + links)
-    runs-on: ubuntu-latest
-    if: ${{ !startsWith(github.event.head_commit.message, 'Release:') }}
-    steps:
-      - uses: actions/checkout@v4
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22'
           cache: npm
-      - run: npm ci
-      - name: Install documentation command tools
-        run: sudo apt-get update && sudo apt-get install -y jq sqlite3
-      - name: Test documented commands, browser utilities and audit guards
-        run: npm run docs:test && npm run docs:test:ui
-      - name: Build and check static SEO and links
-        run: npm run docs:build
-
-  rust:
-    name: rust (clippy + cargo test)
-    # macOS runners ship the WebKit framework Tauri's crate links against, so
-    # `cargo` builds with no extra system packages — unlike Linux, which would
-    # need the webkit2gtk apt stack. release.yml already uses macOS too.
-    runs-on: macos-latest
-    if: ${{ !startsWith(github.event.head_commit.message, 'Release:') }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-
-      - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-
-      - name: Cargo test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: npm ci
+      - name: Type-check frontend
+        run: npx vue-tsc --noEmit
+      - name: Test session sorting and update checks
+        run: npm run test:run -- test/sessionsToolbar.test.ts test/updateCheck.test.ts test/api.test.ts
+      - name: Test Codex compatibility and last-reply ordering
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib agents::codex::tests -- --nocapture

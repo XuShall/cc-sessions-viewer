@@ -144,6 +144,7 @@ fn row_to_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         message_count: msg_count.max(0) as usize,
         pi_branch_count: None,
         pi_entry_count: None,
+        last_reply_at: None,
         codex_app_list_rank: None,
         codex_app_list_scanned: 0,
         codex_app_first_page_size: 0,

@@ -4978,6 +4978,7 @@ provide<PaneActions>(PaneActionsKey, {
         <SessionsTopbar
           v-else-if="activeProject"
           :sessions="visibleSessions"
+          :agent="agent"
         />
         <div v-else class="chat-topbar">
           <button

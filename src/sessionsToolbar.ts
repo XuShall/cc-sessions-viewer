@@ -12,7 +12,7 @@
 import { computed, ref } from 'vue'
 import type { SessionMeta } from './types'
 
-/** 排序方式：更新时间最新 / 最早、创建时间最新 / 最早、体积、消息数。 */
+/** 排序方式：更新时间、创建时间、体积、消息数，以及独立的回复时间。 */
 export type SessionSort =
   | 'recent'
   | 'oldest'
@@ -20,6 +20,7 @@ export type SessionSort =
   | 'createdOldest'
   | 'size'
   | 'messages'
+  | 'replyRecent'
 
 /** 搜索关键词：匹配标题 + 会话 ID，空串表示未搜索。 */
 export const sessionSearch = ref('')
@@ -78,6 +79,12 @@ export function filterSessions(sessions: SessionMeta[]): SessionMeta[] {
   const byRecent = (a: SessionMeta, b: SessionMeta) => b.modified - a.modified
   out.sort((a, b) => {
     switch (sessionSort.value) {
+      case 'replyRecent': {
+        // Unanswered sessions follow answered ones, regardless of file updates.
+        if (a.lastReplyAt == null) return b.lastReplyAt == null ? byRecent(a, b) : 1
+        if (b.lastReplyAt == null) return -1
+        return b.lastReplyAt - a.lastReplyAt || byRecent(a, b)
+      }
       case 'oldest':
         return a.modified - b.modified
       case 'createdRecent':

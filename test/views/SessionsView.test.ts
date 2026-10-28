@@ -169,6 +169,27 @@ describe('SessionsView', () => {
     expect(wrapper.emitted('batch-delete')).toHaveLength(1)
   })
 
+  it('uses reply ordering and reply labels only in the new sort mode', async () => {
+    const wrapper = factory([
+      session({ path: '/work/proj/a.jsonl', title: 'Latest activity', modified: 300, lastReplyAt: 10 }),
+      session({ path: '/work/proj/b.jsonl', title: 'Latest reply', modified: 100, lastReplyAt: 30 }),
+      session({ path: '/work/proj/c.jsonl', title: 'Unanswered', modified: 400 }),
+    ], { agent: 'codex' })
+    const cards = () => wrapper.findAll('.session-card')
+    expect(cards()[0].text()).toContain('Unanswered')
+    expect(cards()[0].text()).toContain('Updated ')
+    sessionSort.value = 'replyRecent'
+    await flushPromises()
+    expect(cards()[0].text()).toContain('Latest reply')
+    expect(cards()[0].text()).toContain('Replied ')
+    expect(cards()[2].text()).toContain('No reply yet')
+    sessionSort.value = 'recent'
+    await flushPromises()
+    expect(cards()[0].text()).toContain('Unanswered')
+    expect(cards()[0].text()).toContain('Updated ')
+    expect(wrapper.text()).not.toContain('No reply yet')
+  })
+
   it('shows the project Git branch in the header action area', async () => {
     const wrapper = factory()
     await flushPromises()

@@ -242,14 +242,46 @@ pub(super) fn history_ids(conn: &Connection) -> Result<HashSet<String>, String> 
 pub(super) struct HistorySummary {
     pub message_count: usize,
     pub size: u64,
+    pub last_reply_at: Option<u64>,
 }
 
 pub(super) fn history_summary(conn: &Connection, id: &str) -> Result<HistorySummary, String> {
-    conn.query_row(
+    let mut summary = conn.query_row(
         "SELECT COALESCE(SUM(json_extract(item_json, '$.type') IN ('userMessage','agentMessage')), 0), \
          COALESCE(SUM(length(CAST(item_json AS BLOB))), 0) FROM thread_items WHERE thread_id = ?1",
-        [id], |row| Ok(HistorySummary { message_count: row.get::<_, i64>(0)?.max(0) as usize, size: row.get::<_, i64>(1)?.max(0) as u64 })
-    ).map_err(|e| format!("Cannot read Codex history summary: {e}"))
+        [id], |row| Ok(HistorySummary { message_count: row.get::<_, i64>(0)?.max(0) as usize, size: row.get::<_, i64>(1)?.max(0) as u64, last_reply_at: None })
+    ).map_err(|e| format!("Cannot read Codex history summary: {e}"))?;
+    // Projected history has its own reply timestamps. Metadata updates and later
+    // questions must not advance the optional reply sort after rollout migration.
+    let mut stmt = conn
+        .prepare(
+            "SELECT item_json, created_at_ms FROM thread_items WHERE thread_id = ?1 \
+         AND json_extract(item_json, '$.type') = 'agentMessage' \
+         AND created_at_ms >= 0 ORDER BY created_at_ms DESC",
+        )
+        .map_err(|e| format!("Cannot read Codex reply time: {e}"))?;
+    let rows = stmt
+        .query_map([id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (json, timestamp) = row.map_err(|e| e.to_string())?;
+        let item: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if matches!(
+            super::agent_message_phase(&item),
+            None | Some("final_answer")
+        ) && matches!(
+            item.get("status").and_then(Value::as_str),
+            None | Some("completed")
+        ) && (super::reply_text_present(item.get("text"))
+            || super::reply_text_present(item.get("content")))
+        {
+            summary.last_reply_at = Some(timestamp as u64);
+            break;
+        }
+    }
+    Ok(summary)
 }
 
 fn input_blocks(content: &Value) -> Vec<Block> {

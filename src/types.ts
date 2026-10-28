@@ -20,6 +20,8 @@ export interface SessionMeta {
   cwd?: string
   created?: string
   modified: number
+  /** Codex-only: last completed assistant reply; absent before the first reply. */
+  lastReplyAt?: number
   size: number
   messageCount: number
   /** Pi-only: terminal branches and complete persisted tree entries. */
