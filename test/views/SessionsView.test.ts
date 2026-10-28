@@ -131,6 +131,22 @@ const factory = (sessions: SessionMeta[] = [session()], props: Partial<Props> = 
   })
 
 describe('SessionsView', () => {
+  it('starts Codex projects in reply-first order and still allows update-time sorting', async () => {
+    resetSessionsToolbar('codex')
+    const wrapper = factory([
+      session({ path: '/p/activity.jsonl', title: 'Latest activity', modified: 300, lastReplyAt: 10 }),
+      session({ path: '/p/reply.jsonl', title: 'Latest reply', modified: 100, lastReplyAt: 30 }),
+      session({ path: '/p/pending.jsonl', title: 'Unanswered', modified: 400 }),
+    ], { agent: 'codex' })
+    expect(wrapper.findAll('.session-card')[0].text()).toContain('Latest reply')
+    expect(wrapper.findAll('.session-card')[0].text()).toContain('Replied ')
+    expect(wrapper.findAll('.session-card')[2].text()).toContain('No reply yet')
+    sessionSort.value = 'recent'
+    await flushPromises()
+    expect(wrapper.findAll('.session-card')[0].text()).toContain('Unanswered')
+    expect(wrapper.findAll('.session-card')[0].text()).toContain('Updated ')
+  })
+
   it('keeps database-only Codex records browsable and deletable without rename/resume', async () => {
     const target = session({ path: 'codex://original-id' })
     const wrapper = factory([target], { agent: 'codex' })
@@ -167,6 +183,27 @@ describe('SessionsView', () => {
     expect(remove.attributes('disabled')).toBeUndefined()
     await remove.trigger('click')
     expect(wrapper.emitted('batch-delete')).toHaveLength(1)
+  })
+
+  it('uses reply ordering and reply labels only in the new sort mode', async () => {
+    const wrapper = factory([
+      session({ path: '/work/proj/a.jsonl', title: 'Latest activity', modified: 300, lastReplyAt: 10 }),
+      session({ path: '/work/proj/b.jsonl', title: 'Latest reply', modified: 100, lastReplyAt: 30 }),
+      session({ path: '/work/proj/c.jsonl', title: 'Unanswered', modified: 400 }),
+    ], { agent: 'codex' })
+    const cards = () => wrapper.findAll('.session-card')
+    expect(cards()[0].text()).toContain('Unanswered')
+    expect(cards()[0].text()).toContain('Updated ')
+    sessionSort.value = 'replyRecent'
+    await flushPromises()
+    expect(cards()[0].text()).toContain('Latest reply')
+    expect(cards()[0].text()).toContain('Replied ')
+    expect(cards()[2].text()).toContain('No reply yet')
+    sessionSort.value = 'recent'
+    await flushPromises()
+    expect(cards()[0].text()).toContain('Unanswered')
+    expect(cards()[0].text()).toContain('Updated ')
+    expect(wrapper.text()).not.toContain('No reply yet')
   })
 
   it('shows the project Git branch in the header action area', async () => {

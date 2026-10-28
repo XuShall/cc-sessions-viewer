@@ -10,9 +10,9 @@
 // 避免分页窗口让搜索 / 排序只覆盖已加载的一页。
 
 import { computed, ref } from 'vue'
-import type { SessionMeta } from './types'
+import type { Agent, SessionMeta } from './types'
 
-/** 排序方式：更新时间最新 / 最早、创建时间最新 / 最早、体积、消息数。 */
+/** 排序方式：更新时间、创建时间、体积、消息数，以及独立的回复时间。 */
 export type SessionSort =
   | 'recent'
   | 'oldest'
@@ -20,10 +20,11 @@ export type SessionSort =
   | 'createdOldest'
   | 'size'
   | 'messages'
+  | 'replyRecent'
 
 /** 搜索关键词：匹配标题 + 会话 ID，空串表示未搜索。 */
 export const sessionSearch = ref('')
-/** 当前排序方式，默认与后端分页一致（时间最新在前）。 */
+/** 选项目时按 Agent 重置：Codex 默认回复优先，其余来源按更新时间。 */
 export const sessionSort = ref<SessionSort>('recent')
 
 /** 批量选择模式开关（与回收站 trashToolbar 平行）。 */
@@ -31,7 +32,7 @@ export const sessionSelectMode = ref(false)
 /** 已勾选的会话 path 集合（仅 sessionSelectMode 下有意义）。 */
 export const selectedSessions = ref<Set<string>>(new Set())
 
-/** 工具栏是否处于「非默认」状态。App.vue watch 此值决定是否加载全部会话。 */
+/** 是否需要加载整个项目：搜索或排序与后端的更新时间分页不一致时补齐。 */
 export const sessionsFilterActive = computed(
   () =>
     sessionSearch.value.trim().length > 0 ||
@@ -53,9 +54,9 @@ export function exitSessionSelectMode() {
 }
 
 /** 切换项目时把工具栏状态归零。 */
-export function resetSessionsToolbar() {
+export function resetSessionsToolbar(agent?: Agent) {
   sessionSearch.value = ''
-  sessionSort.value = 'recent'
+  sessionSort.value = agent === 'codex' ? 'replyRecent' : 'recent'
   sessionSelectMode.value = false
   selectedSessions.value = new Set()
 }
@@ -78,6 +79,12 @@ export function filterSessions(sessions: SessionMeta[]): SessionMeta[] {
   const byRecent = (a: SessionMeta, b: SessionMeta) => b.modified - a.modified
   out.sort((a, b) => {
     switch (sessionSort.value) {
+      case 'replyRecent': {
+        // Unanswered sessions follow answered ones, regardless of file updates.
+        if (a.lastReplyAt == null) return b.lastReplyAt == null ? byRecent(a, b) : 1
+        if (b.lastReplyAt == null) return -1
+        return b.lastReplyAt - a.lastReplyAt || byRecent(a, b)
+      }
       case 'oldest':
         return a.modified - b.modified
       case 'createdRecent':
