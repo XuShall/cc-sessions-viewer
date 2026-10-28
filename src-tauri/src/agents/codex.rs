@@ -1388,7 +1388,12 @@ impl<V: Clone> FpCache<V> {
         self.next_seq += 1;
         self.entries.insert(
             fp.to_path_buf(),
-            FpEntry { mtime, size, seq, value },
+            FpEntry {
+                mtime,
+                size,
+                seq,
+                value,
+            },
         );
         if self.entries.len() <= max {
             return;
@@ -1617,7 +1622,11 @@ pub fn scan_cache_entries() -> usize {
 /// 带缓存的首行 `session_meta`。列表要靠它判断「这个文件属于哪个项目」，
 /// 而这是唯一需要遍历全盘文件的地方 —— 缓存住它，那 257ms 的固定地板就没了。
 fn meta_cached(fp: &Path, mtime: u64, size: u64) -> Option<Meta> {
-    if let Some(hit) = meta_cache().lock().ok().and_then(|c| c.get(fp, mtime, size)) {
+    if let Some(hit) = meta_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(fp, mtime, size))
+    {
         return Some(hit);
     }
     let m = meta(fp)?;
@@ -1625,6 +1634,67 @@ fn meta_cached(fp: &Path, mtime: u64, size: u64) -> Option<Meta> {
         cache.put(fp, mtime, size, m.clone(), CACHE_MAX_ENTRIES);
     }
     Some(m)
+}
+
+fn reply_text_present(content: Option<&Value>) -> bool {
+    match content {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(blocks)) => blocks.iter().any(|block| {
+            matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("input_text" | "text" | "Text" | "output_text")
+            ) && block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        }),
+        _ => false,
+    }
+}
+
+/// Read only completed assistant replies. Keep this independent of the existing
+/// activity timestamp so opting into reply sorting cannot change other sorts.
+fn reply_timestamp_from_record(record: &Value) -> Option<u64> {
+    let payload = record.get("payload")?;
+    let final_phase =
+        |message: &Value| matches!(agent_message_phase(message), None | Some("final_answer"));
+    let is_reply = match (
+        record.get("type").and_then(Value::as_str),
+        payload.get("type").and_then(Value::as_str),
+    ) {
+        (Some("event_msg"), Some("agent_message")) => {
+            final_phase(payload) && reply_text_present(payload.get("message"))
+        }
+        (Some("event_msg"), Some("item_completed")) => {
+            let item = payload.get("item")?;
+            item.get("type").and_then(Value::as_str) == Some("AgentMessage")
+                && final_phase(item)
+                && (reply_text_present(item.get("text")) || reply_text_present(item.get("content")))
+        }
+        (Some("response_item"), Some("message")) => {
+            payload.get("role").and_then(Value::as_str) == Some("assistant")
+                && final_phase(payload)
+                && matches!(
+                    payload.get("status").and_then(Value::as_str),
+                    None | Some("completed")
+                )
+                && reply_text_present(payload.get("content"))
+        }
+        _ => false,
+    };
+    if !is_reply {
+        return None;
+    }
+    payload
+        .get("completed_at_ms")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            record
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_iso8601_ms)
+                .and_then(|timestamp| u64::try_from(timestamp).ok())
+        })
 }
 
 /// `scan()` 里必须整文件读一遍才能算出来的那部分。
@@ -1637,6 +1707,7 @@ struct ScanBody {
     message_count: usize,
     thread_name: Option<String>,
     first_user_title: String,
+    last_reply_at: Option<u64>,
 }
 
 fn scan_body_uncached(fp: &Path) -> ScanBody {
@@ -1650,6 +1721,7 @@ fn scan_body_uncached(fp: &Path) -> ScanBody {
     let mut completed_agent_message_count = 0usize;
     let mut completed_user_message_ids = HashSet::new();
     let mut response_user_messages: Vec<String> = Vec::new();
+    let mut last_reply_at: Option<u64> = None;
     if let Ok(file) = fs::File::open(fp) {
         for line in BufReader::new(file).lines().map_while(Result::ok) {
             if line.trim().is_empty() {
@@ -1659,6 +1731,9 @@ fn scan_body_uncached(fp: &Path) -> ScanBody {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            if let Some(timestamp) = reply_timestamp_from_record(&v) {
+                last_reply_at = Some(last_reply_at.map_or(timestamp, |last| last.max(timestamp)));
+            }
             let p = match v.get("payload") {
                 Some(p) => p,
                 None => continue,
@@ -1760,11 +1835,16 @@ fn scan_body_uncached(fp: &Path) -> ScanBody {
         message_count,
         thread_name,
         first_user_title,
+        last_reply_at,
     }
 }
 
 fn scan_body(fp: &Path, mtime: u64, size: u64) -> ScanBody {
-    if let Some(hit) = scan_body_cache().lock().ok().and_then(|c| c.get(fp, mtime, size)) {
+    if let Some(hit) = scan_body_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(fp, mtime, size))
+    {
         return hit;
     }
     let body = scan_body_uncached(fp);
@@ -1794,6 +1874,7 @@ fn scan(
         message_count,
         thread_name,
         first_user_title,
+        last_reply_at,
     } = scan_body(fp, modified, size);
     let id = if m.id.is_empty() {
         file_name.trim_end_matches(".jsonl").to_string()
@@ -1822,6 +1903,7 @@ fn scan(
         cwd: Some(m.cwd.clone()),
         created: m.created.clone(),
         modified: activity_time,
+        last_reply_at,
         size,
         message_count,
         pi_branch_count: None,
@@ -3637,6 +3719,230 @@ Only after the original task is complete, process this follow-up in the order re
         p
     }
 
+    #[test]
+    fn reply_sort_metadata_preserves_original_activity_time() {
+        let p = write_temp(
+            "codex-independent-reply-time.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-19T12:00:00Z","type":"session_meta","payload":{"id":"independent-reply","cwd":"/tmp","timestamp":"2026-10-19T12:00:00Z"}}"#,
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Previous answer"}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"New question"}}"#,
+                r#"{"timestamp":"2026-10-20T05:01:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"Working"}}"#,
+                r#"{"timestamp":"2026-10-21T03:19:59Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}"#,
+            ],
+        );
+        let meta = meta(&p).unwrap();
+        let mtime = mtime_millis(&p);
+        let size = fs::metadata(&p).unwrap().len();
+        let activity = activity_timestamp(&p, mtime, size, &meta);
+        let session = scan(
+            &p,
+            &meta,
+            &HashMap::new(),
+            mtime,
+            activity,
+            CodexThreadFlags::default(),
+        );
+        assert_eq!(
+            session.modified,
+            parse_iso8601_ms("2026-10-20T05:01:00Z").unwrap() as u64
+        );
+        assert_eq!(
+            session.last_reply_at,
+            Some(parse_iso8601_ms("2026-10-19T12:10:00Z").unwrap() as u64)
+        );
+        let serialized = serde_json::to_value(session).unwrap();
+        assert_eq!(serialized["modified"].as_u64(), Some(activity));
+        assert_eq!(
+            serialized["lastReplyAt"].as_u64(),
+            Some(parse_iso8601_ms("2026-10-19T12:10:00Z").unwrap() as u64)
+        );
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn reply_sort_supports_escaped_text_and_old_and_new_formats() {
+        let text = "A reply with \"quotes\", a newline\nand C:\\repo\\main.rs";
+        let cases = [
+            ("event_msg", json!({"type":"agent_message","message":text})),
+            (
+                "event_msg",
+                json!({"type":"agent_message","phase":"final_answer","message":text}),
+            ),
+            (
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","text":text}}),
+            ),
+            (
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"Text","text":text}]}}),
+            ),
+            (
+                "response_item",
+                json!({"type":"message","role":"assistant","content":text}),
+            ),
+            (
+                "response_item",
+                json!({"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":text}]}),
+            ),
+        ];
+        for (index, (kind, payload)) in cases.into_iter().enumerate() {
+            let record = json!({"timestamp":"2026-10-19T12:10:00Z","type":kind,"payload":payload});
+            let p = write_temp(
+                &format!("codex-independent-reply-format-{index}.jsonl"),
+                &[&record.to_string()],
+            );
+            assert_eq!(
+                scan_body_uncached(&p).last_reply_at,
+                Some(parse_iso8601_ms("2026-10-19T12:10:00Z").unwrap() as u64),
+                "case {index}"
+            );
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn reply_sort_prefers_explicit_completion_time() {
+        let record = json!({
+            "timestamp":"2026-10-19T12:10:38.707Z",
+            "type":"event_msg",
+            "payload":{"type":"item_completed","completed_at_ms":1_792_411_838_702u64,
+                "item":{"type":"AgentMessage","phase":"final_answer","content":[{"type":"text","text":"Answer"}]}}
+        });
+        assert_eq!(
+            reply_timestamp_from_record(&record),
+            Some(1_792_411_838_702)
+        );
+    }
+
+    #[test]
+    fn reply_sort_ignores_settings_questions_progress_tools_and_empty_replies() {
+        for (kind, payload) in [
+            ("event_msg", json!({"type":"thread_settings_applied"})),
+            (
+                "event_msg",
+                json!({"type":"user_message","message":"Question"}),
+            ),
+            (
+                "event_msg",
+                json!({"type":"agent_message","phase":"commentary","message":"Progress"}),
+            ),
+            (
+                "event_msg",
+                json!({"type":"agent_message","phase":"final_answer","message":"  \n  "}),
+            ),
+            (
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"AgentMessage","phase":"commentary","text":"Progress"}}),
+            ),
+            (
+                "event_msg",
+                json!({"type":"item_completed","item":{"type":"Reasoning","text":"Thoughts"}}),
+            ),
+            ("event_msg", json!({"type":"task_complete"})),
+            (
+                "response_item",
+                json!({"type":"function_call_output","output":"Tool output"}),
+            ),
+            (
+                "response_item",
+                json!({"type":"message","role":"developer","content":"Instructions"}),
+            ),
+            (
+                "response_item",
+                json!({"type":"message","role":"user","content":"Question"}),
+            ),
+            (
+                "response_item",
+                json!({"type":"message","role":"assistant","phase":"commentary","content":"Progress"}),
+            ),
+            (
+                "response_item",
+                json!({"type":"message","role":"assistant","phase":"final_answer","status":"in_progress","content":"Partial answer"}),
+            ),
+        ] {
+            let record = json!({"timestamp":"2026-10-19T12:10:00Z","type":kind,"payload":payload});
+            assert_eq!(reply_timestamp_from_record(&record), None, "{record}");
+        }
+    }
+
+    #[test]
+    fn reply_sort_leaves_unanswered_sessions_without_a_reply_timestamp() {
+        let p = write_temp(
+            "codex-independent-reply-unanswered.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-19T12:00:00Z","type":"session_meta","payload":{"id":"unanswered","cwd":"/tmp","timestamp":"2026-10-19T12:00:00Z"}}"#,
+                r#"{"timestamp":"2026-10-20T05:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"Question"}}"#,
+                r#"{"timestamp":"2026-10-21T03:19:59Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}"#,
+            ],
+        );
+        let meta = meta(&p).unwrap();
+        let mtime = mtime_millis(&p);
+        let activity = activity_timestamp(&p, mtime, fs::metadata(&p).unwrap().len(), &meta);
+        let session = scan(
+            &p,
+            &meta,
+            &HashMap::new(),
+            mtime,
+            activity,
+            CodexThreadFlags::default(),
+        );
+        assert_eq!(
+            session.modified,
+            parse_iso8601_ms("2026-10-20T05:00:00Z").unwrap() as u64
+        );
+        assert_eq!(session.last_reply_at, None);
+        assert!(serde_json::to_value(session)
+            .unwrap()
+            .get("lastReplyAt")
+            .is_none());
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn reply_sort_cache_advances_only_when_a_reply_is_appended() {
+        let p = write_temp(
+            "codex-independent-reply-cache.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"First\nanswer"}}"#,
+            ],
+        );
+        let read =
+            || scan_body(&p, mtime_millis(&p), fs::metadata(&p).unwrap().len()).last_reply_at;
+        let initial = read();
+        {
+            let mut file = fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(file, "{}", json!({"timestamp":"2026-10-20T05:00:00Z","type":"event_msg","payload":{"type":"thread_settings_applied"}})).unwrap();
+        }
+        assert_eq!(read(), initial);
+        {
+            let mut file = fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(file, "{}", json!({"timestamp":"2026-10-20T05:10:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Second\nanswer"}})).unwrap();
+        }
+        assert_eq!(
+            read(),
+            Some(parse_iso8601_ms("2026-10-20T05:10:00Z").unwrap() as u64)
+        );
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn reply_sort_keeps_latest_valid_reply_across_out_of_order_and_incomplete_records() {
+        let p = write_temp(
+            "codex-independent-reply-partial.jsonl",
+            &[
+                r#"{"timestamp":"2026-10-20T05:10:00Z","type":"event_msg","payload":{"type":"agent_message","message":"Latest"}}"#,
+                r#"{"timestamp":"2026-10-19T12:10:00Z","type":"event_msg","payload":{"type":"agent_message","message":"Older"}}"#,
+                r#"{"timestamp":"2026-10-21"#,
+            ],
+        );
+        assert_eq!(
+            scan_body_uncached(&p).last_reply_at,
+            Some(parse_iso8601_ms("2026-10-20T05:10:00Z").unwrap() as u64)
+        );
+        let _ = fs::remove_file(p);
+    }
+
     // ---- GUI chat（codex exec --json 实时事件流）协议解析 ----
 
     #[test]
@@ -4405,4 +4711,3 @@ fn gui_chat_uses_codex_app_server_process_model() {
     );
     assert_eq!(ChatProcessModel::CodexAppServer.as_str(), "codexAppServer");
 }
-

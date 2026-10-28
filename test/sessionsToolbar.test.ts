@@ -5,6 +5,7 @@ import {
   sessionSearch,
   sessionSort,
   sessionsFilterActive,
+  type SessionSort,
 } from '../src/sessionsToolbar'
 import type { SessionMeta } from '../src/types'
 
@@ -36,6 +37,50 @@ describe('filterSessions', () => {
   it('sorts oldest first', () => {
     sessionSort.value = 'oldest'
     expect(filterSessions(items).map((s) => s.path)).toEqual(['b', 'c', 'a'])
+  })
+
+  it.each<SessionSort>(['recent', 'oldest', 'createdRecent', 'createdOldest', 'size', 'messages'])(
+    'keeps %s ordering unchanged when reply timestamps are present', (sort) => {
+      sessionSort.value = sort
+      const expected = filterSessions(items).map((s) => s.path)
+      const withReplies = items.map((s, index) => ({ ...s, lastReplyAt: 1_000 + index }))
+      expect(filterSessions(withReplies).map((s) => s.path)).toEqual(expected)
+    },
+  )
+
+  it('sorts by reply time only after the new option is selected', () => {
+    const replies = [
+      session({ path: 'recent-update', modified: 300, lastReplyAt: 10 }),
+      session({ path: 'recent-reply', modified: 100, lastReplyAt: 30 }),
+      session({ path: 'middle', modified: 200, lastReplyAt: 20 }),
+    ]
+    expect(filterSessions(replies).map((s) => s.path)).toEqual(['recent-update', 'middle', 'recent-reply'])
+    sessionSort.value = 'replyRecent'
+    expect(filterSessions(replies).map((s) => s.path)).toEqual(['recent-reply', 'middle', 'recent-update'])
+    sessionSort.value = 'recent'
+    expect(filterSessions(replies).map((s) => s.path)).toEqual(['recent-update', 'middle', 'recent-reply'])
+  })
+
+  it('puts unanswered sessions last without treating their update time as a reply', () => {
+    sessionSort.value = 'replyRecent'
+    const replies = [
+      session({ path: 'unanswered-old', modified: 900 }),
+      session({ path: 'answered', modified: 10, lastReplyAt: 0 }),
+      session({ path: 'unanswered-new', modified: 1_000 }),
+    ]
+    expect(filterSessions(replies).map((s) => s.path)).toEqual([
+      'answered', 'unanswered-new', 'unanswered-old',
+    ])
+  })
+
+  it('breaks equal reply times by the existing update time without changing the input', () => {
+    sessionSort.value = 'replyRecent'
+    const replies = [
+      session({ path: 'old', modified: 10, lastReplyAt: 100 }),
+      session({ path: 'new', modified: 20, lastReplyAt: 100 }),
+    ]
+    expect(filterSessions(replies).map((s) => s.path)).toEqual(['new', 'old'])
+    expect(replies.map((s) => s.path)).toEqual(['old', 'new'])
   })
 
   it('sorts by creation time, newest first', () => {
@@ -138,6 +183,14 @@ describe('sessionsFilterActive', () => {
   it('is true for creation-time sorting', () => {
     sessionSort.value = 'createdRecent'
     expect(sessionsFilterActive.value).toBe(true)
+  })
+
+  it('activates full-project loading for reply-time sorting', () => {
+    sessionSort.value = 'replyRecent'
+    expect(sessionsFilterActive.value).toBe(true)
+    resetSessionsToolbar()
+    expect(sessionSort.value).toBe('recent')
+    expect(sessionsFilterActive.value).toBe(false)
   })
 })
 
