@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { t } from '../../i18n'
-import type { SessionMeta } from '../../types'
+import type { Agent, SessionMeta } from '../../types'
 import {
   sessionSearch,
   sessionSort,
@@ -18,7 +18,7 @@ import {
 // `.ct-actions` 原本住在这里（仅 ID / 批量选择 / 批量导出 / 批量删除），现已挪到
 // SessionsView 的 .list-head-actions 里，跟项目级动作 (新建/刷新/删除项目) 汇成
 // 一排，避免顶栏 + body header 两层 icon-only 按钮在同一垂直线上视觉冲突。
-defineProps<{ sessions: SessionMeta[] }>()
+const props = defineProps<{ sessions: SessionMeta[]; agent?: Agent }>()
 
 // 搜索框防抖：打字时 `draft` 立即跟着光标走，静止 220ms 后才同步到共享
 // `sessionSearch`，避免每个按键都触发整张会话列表的 filter / 高亮重算。
@@ -44,7 +44,11 @@ const SORTS: { value: SessionSort; key: string }[] = [
   { value: 'createdOldest', key: 'list.tb.sortCreatedOldest' },
   { value: 'size', key: 'list.tb.sortSize' },
   { value: 'messages', key: 'list.tb.sortMessages' },
+  { value: 'replyRecent', key: 'list.tb.sortReplyRecent' },
 ]
+const availableSorts = computed(() =>
+  SORTS.filter((sort) => sort.value !== 'replyRecent' || props.agent === 'codex'),
+)
 const sortMenuOpen = ref(false)
 const sortMenuEl = ref<HTMLElement>()
 const sortLabel = computed(() => {
@@ -105,7 +109,7 @@ onUnmounted(() => {
         </button>
         <div v-if="sortMenuOpen" class="ct-scope-menu" role="menu">
           <button
-            v-for="s in SORTS"
+            v-for="s in availableSorts"
             :key="s.value"
             type="button"
             class="ct-scope-item"

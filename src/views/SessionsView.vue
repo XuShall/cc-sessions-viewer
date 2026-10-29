@@ -926,7 +926,10 @@ onUnmounted(() => document.removeEventListener('click', onNewMenuDocClick))
         <div class="session-meta">
           <span>{{ t('list.messages', { n: s.messageCount }) }}</span>
           <span>{{ formatSize(s.size) }}</span>
-          <span>{{ t('session.updated', { time: formatTime(s.modified) }) }}</span>
+          <span v-if="sessionSort === 'replyRecent'">
+            {{ s.lastReplyAt == null ? t('session.noReply') : t('session.replied', { time: formatTime(s.lastReplyAt) }) }}
+          </span>
+          <span v-else>{{ t('session.updated', { time: formatTime(s.modified) }) }}</span>
           <!-- Token 角标：IntersectionObserver 看到这条 chip 才发请求 (`observeUsageCard`)。
                cache 命中时显示 total；空数据显示 "—"；loading 显示空占位。 -->
           <span

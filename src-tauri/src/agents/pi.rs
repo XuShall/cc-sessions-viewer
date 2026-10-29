@@ -2003,6 +2003,7 @@ fn session_meta(record: &PiSessionRecord) -> SessionMeta {
         message_count: summary.message_count,
         pi_branch_count: Some(summary.branch_count),
         pi_entry_count: Some(summary.entry_count),
+        last_reply_at: None,
         codex_app_list_rank: None,
         codex_app_list_scanned: 0,
         codex_app_first_page_size: 0,
