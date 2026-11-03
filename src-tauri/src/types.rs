@@ -206,6 +206,9 @@ pub struct SessionMeta {
     pub cwd: Option<String>,
     pub created: Option<String>,
     pub modified: u64,
+    /// Last completed assistant reply, independent of the existing update time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_reply_at: Option<u64>,
     pub size: u64,
     pub message_count: usize,
     /// Pi exposes the selected-lineage count separately from its complete tree.

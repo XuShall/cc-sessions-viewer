@@ -1156,6 +1156,7 @@ fn session_meta(record: &KimiSessionRecord) -> SessionMeta {
         message_count,
         pi_branch_count: None,
         pi_entry_count: None,
+        last_reply_at: None,
         codex_app_list_rank: None,
         codex_app_list_scanned: 0,
         codex_app_first_page_size: 0,

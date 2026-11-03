@@ -1,379 +1,143 @@
-name: Release
+name: 同步作者并发布 Windows
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths: ['.github/personal/**', '.github/workflows/release.yml']
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to build / publish (e.g. vX.Y.Z)'
-        required: true
+      upstream_tag:
+        description: '作者正式版标签；留空自动使用最新正式版，例如 v0.6.3'
+        required: false
         type: string
+      rebuild:
+        description: '没有新正式版时也重新打包，生成新的 sortfix 修订'
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: '23 3 * * *'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: personal-windows-update
   cancel-in-progress: false
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: windows-latest
-            args: ''
-          - platform: macos-latest
-            args: '--target universal-apple-darwin'
-          - platform: ubuntu-22.04
-            args: ''
-
-    runs-on: ${{ matrix.platform }}
+  verify:
+    if: github.repository == 'XuShall/cc-sessions-viewer' && github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.AUTO_UPDATE == 'true')
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      changed: ${{ steps.prepare.outputs.changed }}
+      tag: ${{ steps.prepare.outputs.tag }}
+    env:
+      HUSKY: '0'
+      CARGO_TERM_COLOR: always
+      PERSONAL_RESULT: ${{ github.workspace }}/personal-result
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 验证同步脚本与冲突停止规则
+        run: python .github/personal/sync.py self-test
+      - name: 获取作者正式版并迁移定制功能
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          REBUILD: '${{ inputs.rebuild || false }}'
+        run: python .github/personal/sync.py prepare
+      - uses: actions/setup-node@v4
+        if: steps.prepare.outputs.changed == 'true'
         with:
-          node-version: 22
+          node-version: '22'
           cache: npm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            patchelf \
-            file
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.prepare.outputs.changed == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.prepare.outputs.changed == 'true'
         with:
           workspaces: src-tauri
-
-      - run: npm ci
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          cache-on-failure: true
+      - name: 云端安装前端依赖
+        if: steps.prepare.outputs.changed == 'true'
+        run: npm ci
+      - name: 前端类型检查
+        if: steps.prepare.outputs.changed == 'true'
+        run: npx vue-tsc --noEmit
+      - name: 验证回复排序、默认值、完整加载、星标和原有界面
+        if: steps.prepare.outputs.changed == 'true'
+        run: npm run test:run -- test/sessionsToolbar.test.ts test/sessionListLoading.test.ts test/components/SessionsTopbar.test.ts test/views/SessionsView.test.ts test/i18n.test.ts test/api.test.ts test/updateCheck.test.ts test/agentMeta.test.ts test/chatComposerOptions.test.ts test/chatContext.test.ts test/chatGuiPreferences.test.ts test/chatSessions.test.ts test/components/ChatComposer.test.ts test/components/SideChatInput.test.ts test/composerInput.test.ts test/views/PricingView.test.ts test/sessionStars.test.ts test/sessionStarLayout.test.ts test/tooltip.test.ts
+      - name: 验证 Codex 回复时间、恢复会话与存储兼容
+        if: steps.prepare.outputs.changed == 'true'
+        run: 'cargo test --manifest-path src-tauri/Cargo.toml --locked --lib agents::codex:: -- --nocapture'
+      - name: 验证作者的 OpenCode 历史兼容
+        if: steps.prepare.outputs.changed == 'true'
+        run: 'cargo test --manifest-path src-tauri/Cargo.toml --locked --lib agents::opencode:: -- --nocapture'
+      - name: 仅编译 Windows x64 安装包
+        if: steps.prepare.outputs.changed == 'true'
+        run: npm run tauri build -- --bundles nsis
+      - name: 核对测试源码并生成便携版和校验文件
+        if: steps.prepare.outputs.changed == 'true'
+        shell: pwsh
+        run: |
+          git diff --exit-code
+          if ($LASTEXITCODE -ne 0) { throw 'Build changed tracked source files' }
+          $plan = Get-Content -LiteralPath "$env:PERSONAL_RESULT/plan.json" -Raw | ConvertFrom-Json -AsHashtable
+          $actualTree = (git write-tree).Trim()
+          if ($actualTree -ne $plan.tree) { throw 'Built source differs from the candidate plan' }
+          $binary = Get-ChildItem -LiteralPath src-tauri/target/release -File -Filter '*.exe' | Where-Object { $_.BaseName -in @('cc-sessions-viewer', 'Sessions Viewer') } | Select-Object -First 1
+          if (-not $binary) { throw 'Windows executable was not found' }
+          $portableDir = Join-Path $env:RUNNER_TEMP 'personal-portable'
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $portableDir 'Sessions Viewer.exe')
+          Compress-Archive -LiteralPath (Join-Path $portableDir 'Sessions Viewer.exe') -DestinationPath "$env:PERSONAL_RESULT/Sessions.Viewer_$($plan.version)_x64_portable.zip"
+          $installers = @(Get-ChildItem -LiteralPath src-tauri/target/release/bundle/nsis -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one Windows installer' }
+          foreach ($installer in $installers) {
+            Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $env:PERSONAL_RESULT $installer.Name.Replace(' ', '.'))
+          }
+          Get-ChildItem -LiteralPath $env:PERSONAL_RESULT -File | Where-Object { $_.Extension -in @('.zip', '.exe') } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -LiteralPath "$env:PERSONAL_RESULT/SHA256SUMS.txt" -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@v4
+        if: steps.prepare.outputs.changed == 'true'
         with:
-          args: ${{ matrix.args }}
-
-      - name: Generate updater latest.json
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          node <<'SCRIPT'
-          const fs = require('fs')
-          const path = require('path')
-          const pkg = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'))
-          const version = pkg.version
-          const releaseTag = process.env.RELEASE_TAG
-          const repo = process.env.GITHUB_REPOSITORY
-
-          if (!releaseTag) throw new Error('RELEASE_TAG is required')
-          if (!repo) throw new Error('GITHUB_REPOSITORY is required')
-
-          function releaseAssetUrl(file) {
-            // GitHub replaces spaces with dots in release asset download URLs
-            return `https://github.com/${repo}/releases/download/${releaseTag}/${file.replace(/ /g, '.')}`
-          }
-
-          function walk(dir) {
-            let files = []
-            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-              const full = path.join(dir, e.name)
-              if (e.isDirectory()) files.push(...walk(full))
-              else files.push(full)
-            }
-            return files
-          }
-
-          const bundleDir = 'src-tauri/target'
-          const allFiles = walk(bundleDir)
-          const platforms = {}
-
-          const mapping = [
-            { ext: '.app.tar.gz', sig: '.app.tar.gz.sig', key: ['darwin-x86_64', 'darwin-aarch64'] },
-            { ext: '-setup.exe', sig: '-setup.exe.sig', key: ['windows-x86_64'] },
-            { ext: '.AppImage', sig: '.AppImage.sig', key: ['linux-x86_64'] },
-          ]
-
-          for (const m of mapping) {
-            const bundle = allFiles.find(f => f.endsWith(m.ext) && !f.endsWith('.sig'))
-            const sigFile = allFiles.find(f => f.endsWith(m.sig))
-            if (bundle && sigFile) {
-              const sig = fs.readFileSync(sigFile, 'utf8').trim()
-              const url = releaseAssetUrl(path.basename(bundle))
-              for (const k of m.key) {
-                platforms[k] = { signature: sig, url }
-              }
-            }
-          }
-
-          if (Object.keys(platforms).length === 0) {
-            console.log('No updater platforms found, skipping latest.json')
-            process.exit(0)
-          }
-
-          const bundleDirForJson = path.dirname(
-            allFiles.find(f => f.endsWith('.sig')) || ''
-          )
-          const outDir = bundleDirForJson || bundleDir
-          const manifest = {
-            version,
-            notes: '',
-            pub_date: new Date().toISOString(),
-            platforms,
-          }
-          const outPath = path.join(outDir, 'latest.json')
-          fs.writeFileSync(outPath, JSON.stringify(manifest, null, 2) + '\n')
-          console.log(`Generated ${outPath} with platforms: ${Object.keys(platforms).join(', ')}`)
-          SCRIPT
-
-      - name: Strip bundled libwayland-client from AppImage
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          APPIMAGE=$(find src-tauri/target -name '*.AppImage' -type f | head -1)
-          [ -z "$APPIMAGE" ] && { echo "No AppImage found, skipping"; exit 0; }
-          chmod +x "$APPIMAGE"
-          # Extract, remove the conflicting lib, repack
-          "$APPIMAGE" --appimage-extract
-          rm -f squashfs-root/usr/lib/libwayland-client.so*
-          # Extraction can leave 0700 directories; the AppDir must be usable by
-          # users other than the packager. Keep data files non-executable.
-          chmod -R a+rX squashfs-root
-          chmod a+rx squashfs-root/AppRun
-          # Download appimagetool if not present
-          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
-          ./appimagetool squashfs-root "$APPIMAGE"
-          rm -rf squashfs-root appimagetool
-
-      - name: Package Windows portable zip
-        if: matrix.platform == 'windows-latest'
-        shell: bash
-        run: |
-          node <<'SCRIPT'
-          const fs = require('fs')
-          const path = require('path')
-          const { execSync } = require('child_process')
-
-          const pkg = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'))
-          const version = pkg.version
-          const targetDir = path.resolve('src-tauri/target/release')
-          const bundleDir = path.resolve('src-tauri/target/release/bundle')
-          fs.mkdirSync(bundleDir, { recursive: true })
-
-          const candidates = ['Sessions Viewer.exe', 'cc-sessions-viewer.exe']
-          let exePath = null
-          for (const name of candidates) {
-            const p = path.join(targetDir, name)
-            if (fs.existsSync(p)) {
-              exePath = p
-              break
-            }
-          }
-
-          if (!exePath) {
-            for (const f of fs.readdirSync(targetDir)) {
-              if (f.endsWith('.exe') && !f.includes('build') && !f.includes('setup')) {
-                exePath = path.join(targetDir, f)
-                break
-              }
-            }
-          }
-
-          if (!exePath) {
-            throw new Error(`Could not find compiled binary in ${targetDir}`)
-          }
-
-          const tempDir = fs.mkdtempSync(path.join(bundleDir, 'portable-'))
-          const destExe = path.join(tempDir, 'Sessions Viewer.exe')
-          fs.copyFileSync(exePath, destExe)
-
-          const zipName = `Sessions.Viewer_${version}_x64_portable.zip`
-          const zipPath = path.join(bundleDir, zipName)
-
-          try {
-            execSync(`7z a -tzip "${zipPath}" "Sessions Viewer.exe"`, { cwd: tempDir, stdio: 'inherit' })
-          } catch {
-            execSync(`powershell -Command "Compress-Archive -Path 'Sessions Viewer.exe' -DestinationPath '${zipPath}' -Force"`, { cwd: tempDir, stdio: 'inherit' })
-          }
-
-          fs.rmSync(tempDir, { recursive: true, force: true })
-          console.log(`Created portable zip: ${zipPath}`)
-          SCRIPT
-
-      - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-${{ matrix.platform }}
+          name: verified-personal-windows
           path: |
-            src-tauri/target/**/release/bundle/**/*.dmg
-            src-tauri/target/**/release/bundle/**/*.app.tar.gz
-            src-tauri/target/**/release/bundle/**/*.msi
-            src-tauri/target/**/release/bundle/**/*-setup.exe
-            src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.AppImage
-            src-tauri/target/**/release/bundle/**/*.sig
-            src-tauri/target/**/release/bundle/**/latest.json
-            src-tauri/target/**/release/bundle/**/*.zip
+            ${{ github.workspace }}/personal-result/*-setup.exe
+            ${{ github.workspace }}/personal-result/*_portable.zip
+            ${{ github.workspace }}/personal-result/SHA256SUMS.txt
+            ${{ github.workspace }}/personal-result/source.patch
+            ${{ github.workspace }}/personal-result/plan.json
           if-no-files-found: error
+          retention-days: 14
 
   publish:
-    needs: build
-    runs-on: ubuntu-latest
+    needs: verify
+    if: needs.verify.outputs.changed == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      PERSONAL_RESULT: ${{ github.workspace }}/personal-result
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Download all bundles
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          pattern: bundle-*
-          path: dist
-          merge-multiple: true
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Merge updater manifests
+          name: verified-personal-windows
+          path: ${{ github.workspace }}/personal-result
+      - name: 保留一个定制提交并发布经过验证的 Windows 下载包
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          node <<'NODE'
-          const fs = require('fs')
-          const path = require('path')
-
-          const root = 'dist'
-          const manifests = []
-          const releaseTag = process.env.RELEASE_TAG
-          const repo = process.env.GITHUB_REPOSITORY
-
-          if (!releaseTag) throw new Error('RELEASE_TAG is required')
-          if (!repo) throw new Error('GITHUB_REPOSITORY is required')
-
-          function releaseAssetUrl(file) {
-            // GitHub replaces spaces with dots in release asset download URLs
-            return `https://github.com/${repo}/releases/download/${releaseTag}/${file.replace(/ /g, '.')}`
-          }
-
-          function walk(dir) {
-            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-              const full = path.join(dir, entry.name)
-              if (entry.isDirectory()) {
-                walk(full)
-              } else if (entry.name === 'latest.json') {
-                manifests.push(full)
-              }
-            }
-          }
-
-          walk(root)
-          if (!manifests.length) {
-            throw new Error('No updater latest.json files found in downloaded artifacts')
-          }
-
-          // Collect ALL files in dist/ — artifact download may rename files
-          // (e.g. spaces → dots), so we need the actual on-disk names for URLs.
-          function walkAll(dir) {
-            let files = []
-            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-              const full = path.join(dir, e.name)
-              if (e.isDirectory()) files.push(...walkAll(full))
-              else files.push(full)
-            }
-            return files
-          }
-          const allDistFiles = walkAll(root)
-
-          let merged = null
-          for (const file of manifests) {
-            const json = JSON.parse(fs.readFileSync(file, 'utf8'))
-            if (!json.version || !json.platforms || typeof json.platforms !== 'object') {
-              throw new Error(`Invalid updater manifest: ${file}`)
-            }
-            if (!merged) {
-              merged = {
-                version: json.version,
-                notes: json.notes,
-                pub_date: json.pub_date,
-                platforms: {},
-              }
-            } else if (merged.version !== json.version) {
-              throw new Error(`Updater manifest version mismatch: ${merged.version} vs ${json.version} in ${file}`)
-            }
-            Object.assign(merged.platforms, json.platforms)
-          }
-
-          // Re-derive URLs from actual files in dist/ — artifact upload/download
-          // can replace spaces with dots in file names, making the build-job URLs stale.
-          const extToKeys = [
-            ['.app.tar.gz', ['darwin-x86_64', 'darwin-aarch64']],
-            ['-setup.exe', ['windows-x86_64']],
-            ['.AppImage',   ['linux-x86_64']],
-          ]
-          for (const [ext, keys] of extToKeys) {
-            const actual = allDistFiles.find(f => f.endsWith(ext) && !f.endsWith('.sig'))
-            if (!actual) continue
-            const url = releaseAssetUrl(path.basename(actual))
-            for (const k of keys) {
-              if (merged.platforms[k]) merged.platforms[k].url = url
-            }
-          }
-
-          const required = ['windows-x86_64', 'linux-x86_64']
-          for (const platform of required) {
-            if (!merged.platforms[platform]) {
-              throw new Error(`Merged updater manifest is missing ${platform}`)
-            }
-          }
-          if (!merged.platforms['darwin-x86_64'] && !merged.platforms['darwin-aarch64']) {
-            throw new Error('Merged updater manifest is missing macOS platforms')
-          }
-
-          for (const file of manifests) {
-            fs.rmSync(file, { force: true })
-          }
-          fs.writeFileSync(path.join(root, 'latest.json'), `${JSON.stringify(merged, null, 2)}\n`)
-          console.log(`Merged ${manifests.length} updater manifests into dist/latest.json`)
-          console.log(`Platforms: ${Object.keys(merged.platforms).sort().join(', ')}`)
-          for (const [k, p] of Object.entries(merged.platforms)) {
-            console.log(`  ${k}: ${p.url}`)
-          }
-          NODE
-
-      - name: Generate release notes
-        run: npx changelogithub
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: dist/**/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/personal/sync.py publish
