@@ -9,7 +9,7 @@ import type { Msg, Block, SessionMeta, Agent, DiffHunk } from './types'
 import { writeFile } from './api'
 import { save as saveDialog, open as openDialog } from '@tauri-apps/plugin-dialog'
 import { t } from './i18n'
-import { exportShowMessageTime } from './settings'
+import { exportCompactMarkdown, exportShowMessageTime } from './settings'
 import { formatTime, isCaveatOnlyMsg, parseSystemEvent, renderText, cleanMetaText, metaKindIsPre, parseMetaFields, parseTeammateMessage, stripImagePlaceholders } from './format'
 import {
   highlightJsonInPlace,
@@ -164,6 +164,23 @@ function diffToText(hunks: DiffHunk[]): string {
 }
 
 // ============================ Markdown ============================
+
+function compactMarkdownMessages(messages: Msg[]): Msg[] {
+  const imagePlaceholder: Block = { kind: 'text', text: `[${t('export.imageOmitted')}]`, isError: false }
+  return messages.flatMap((message) => {
+    if (message.metaKind) return []
+    const hasImages = message.blocks.some((block) => block.kind === 'image')
+    const blocks = message.blocks.flatMap((block) => {
+      if (block.kind === 'image') return [imagePlaceholder]
+      if (block.kind === 'file') return block.filePath ? [block] : []
+      if (block.kind !== 'text') return []
+      const text = hasImages ? stripImagePlaceholders(block.text ?? '') : block.text
+      return text?.trim() ? [{ ...block, text }] : []
+    })
+    const compact = { ...message, blocks }
+    return blocks.length && !parseSystemEvent(compact) ? [compact] : []
+  })
+}
 
 function toolResultMd(b: Block): string {
   const head = b.filePath
@@ -1576,12 +1593,19 @@ export function buildExportEnvelope(
   )
 }
 
+async function markdownForExport(session: SessionMeta, messages: Msg[], agent: Agent): Promise<string> {
+  const prepared = exportCompactMarkdown.value
+    ? compactMarkdownMessages(messages)
+    : await inlineLocalImages(messages)
+  return messagesToMarkdown(session, prepared, agent)
+}
+
 export async function exportMarkdown(
   session: SessionMeta,
   messages: Msg[],
   agent: Agent,
 ): Promise<string | null> {
-  const md = messagesToMarkdown(session, await inlineLocalImages(messages), agent)
+  const md = await markdownForExport(session, messages, agent)
   return pickAndWrite(md, `${sanitizeFilename(session.title)}.md`, 'md')
 }
 
@@ -1647,7 +1671,7 @@ export async function exportMarkdownToDir(
   agent: Agent,
   dir: string,
 ): Promise<string> {
-  const md = messagesToMarkdown(session, await inlineLocalImages(messages), agent)
+  const md = await markdownForExport(session, messages, agent)
   return writeFile(`${dir}/${batchFileName(session, 'md')}`, md)
 }
 

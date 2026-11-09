@@ -8,7 +8,7 @@ import {
   sessionSearch,
   sessionSort,
 } from '../../src/sessionsToolbar'
-import type { SessionMeta } from '../../src/types'
+import type { Agent, SessionMeta } from '../../src/types'
 
 // Only the search bar + sort dropdown still live in the topbar; the with-id
 // filter, select-mode entry, and batch operations were moved into
@@ -32,9 +32,9 @@ const session = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   ...over,
 })
 
-const factory = (sessions: SessionMeta[] = [session(), session({ path: '/p/b.jsonl' })]) =>
+const factory = (sessions: SessionMeta[] = [session(), session({ path: '/p/b.jsonl' })], agent?: Agent) =>
   mount(SessionsTopbar, {
-    props: { sessions },
+    props: { sessions, agent },
     global: { directives: { tooltip: vTooltip } },
   })
 
@@ -63,6 +63,49 @@ describe('SessionsTopbar', () => {
 
     await items[2].trigger('click')
     expect(sessionSort.value).toBe('createdRecent')
+  })
+
+  it('adds reply-time sorting to Codex without removing the original six options', async () => {
+    resetSessionsToolbar('codex')
+    const wrapper = factory([session()], 'codex')
+    expect(wrapper.find('.ct-scope-label').text()).toBe('Latest reply first')
+    await wrapper.find('.ct-scope-btn').trigger('click')
+    const items = wrapper.findAll('.ct-scope-item')
+    expect(items.map((item) => item.text())).toEqual([
+      'Newest first', 'Oldest first', 'Created: newest first', 'Created: oldest first',
+      'Largest first', 'Most messages', 'Latest reply first',
+    ])
+    expect(items[6].attributes('aria-checked')).toBe('true')
+    await items[0].trigger('click')
+    expect(sessionSort.value).toBe('recent')
+    expect(wrapper.find('.ct-scope-label').text()).toBe('Newest first')
+    await wrapper.find('.ct-scope-btn').trigger('click')
+    await wrapper.findAll('.ct-scope-item')[6].trigger('click')
+    expect(sessionSort.value).toBe('replyRecent')
+    expect(wrapper.find('.ct-scope-label').text()).toBe('Latest reply first')
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('uses the requested Chinese label for the new sort option', async () => {
+    setLang('zh')
+    resetSessionsToolbar('codex')
+    const wrapper = factory([session()], 'codex')
+    expect(wrapper.find('.ct-scope-label').text()).toBe('回复优先')
+    await wrapper.find('.ct-scope-btn').trigger('click')
+    const reply = wrapper.findAll('.ct-scope-item').find((item) => item.text() === '回复优先')!
+    expect(reply).toBeDefined()
+    await reply.trigger('click')
+    expect(wrapper.find('.ct-scope-label').text()).toBe('回复优先')
+    wrapper.unmount()
+  })
+
+  it('keeps the original sort menu for sources without reply metadata', async () => {
+    const wrapper = factory([session()], 'claude')
+    await wrapper.find('.ct-scope-btn').trigger('click')
+    expect(wrapper.findAll('.ct-scope-item')).toHaveLength(6)
+    expect(wrapper.text()).not.toContain('Latest reply first')
+    wrapper.unmount()
   })
 
   it('focuses the search box on the ⌘F / Ctrl+F shortcut', () => {

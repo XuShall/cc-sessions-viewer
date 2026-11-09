@@ -1261,6 +1261,7 @@ fn session_meta(record: &GrokSessionRecord) -> SessionMeta {
         message_count: visible_message_count(&messages),
         pi_branch_count: None,
         pi_entry_count: None,
+        last_reply_at: None,
         codex_app_list_rank: None,
         codex_app_list_scanned: 0,
         codex_app_first_page_size: 0,

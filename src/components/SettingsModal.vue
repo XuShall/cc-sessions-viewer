@@ -46,6 +46,8 @@ import {
   setShowThinking,
   exportShowMessageTime,
   setExportShowMessageTime,
+  exportCompactMarkdown,
+  setExportCompactMarkdown,
   showChatRail,
   setShowChatRail,
   chatRailCount,
@@ -1197,6 +1199,24 @@ async function refreshTurnHooks() {
                 <span class="set-toggle-thumb" />
               </span>
             </label>
+            <button
+              type="button"
+              class="set-row set-row-clickable"
+              style="width: 100%; text-align: start"
+              role="switch"
+              :aria-checked="exportCompactMarkdown"
+              :aria-label="t('settings.exportCompactMarkdown')"
+              aria-describedby="export-compact-markdown-description"
+              @click="setExportCompactMarkdown(!exportCompactMarkdown)"
+            >
+              <span class="set-row-text">
+                <span class="set-row-title">{{ t('settings.exportCompactMarkdown') }}</span>
+                <span id="export-compact-markdown-description" class="set-row-desc">{{ t('settings.exportCompactMarkdownDesc') }}</span>
+              </span>
+              <span class="set-toggle-track set-row-control" :class="{ on: exportCompactMarkdown }">
+                <span class="set-toggle-thumb" />
+              </span>
+            </button>
             <label class="set-row set-row-clickable" @click.prevent="setShowChatRail(!showChatRail)">
               <div class="set-row-text">
                 <div class="set-row-title">{{ t('settings.showChatRail') }}</div>

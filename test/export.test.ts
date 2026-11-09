@@ -21,10 +21,11 @@ import {
   exportJson,
   exportJsonToDir,
   exportMarkdown,
+  exportMarkdownToDir,
   messagesToHtml,
   messagesToMarkdown,
 } from '../src/export'
-import { setExportShowMessageTime, setLang } from '../src/settings'
+import { setExportCompactMarkdown, setExportShowMessageTime, setLang } from '../src/settings'
 import { formatTime } from '../src/format'
 
 beforeEach(() => {
@@ -39,6 +40,7 @@ beforeEach(() => {
   }))
 })
 afterEach(() => {
+  setExportCompactMarkdown(false)
   document.documentElement.classList.remove('theme-dark')
 })
 
@@ -551,6 +553,61 @@ describe('exportMarkdown / exportHtml', () => {
     const written = writeFileMock.mock.calls[0][1]
     expect(written).toContain('data:image/png;base64,SU1BR0U=')
     expect(written).not.toContain('/Users/me/cache/abc.png')
+  })
+
+  it('exports compact Markdown for both single and batch exports', async () => {
+    setExportCompactMarkdown(true)
+    saveMock.mockResolvedValue('/exports/session.md')
+    const timestamp = '2026-08-20T09:15:00.000Z'
+    const messages = [
+      msg('user', [
+        text('My prompt [Image #1]'),
+        blk({ kind: 'image', imageSrc: '/private/screenshot.png' }),
+        blk({ kind: 'file', filePath: '/work/example.txt' }),
+        blk({ kind: 'tool_result', text: 'mixed tool output' }),
+      ], { timestamp }),
+      msg('assistant', [
+        text('The answer\n\n```ts\nconst result = 42\n```'),
+        blk({ kind: 'thinking', text: 'private reasoning' }),
+        blk({ kind: 'tool_use', toolId: 'call', toolName: 'Read', toolInput: 'tool arguments' }),
+        blk({ kind: 'image', imageSrc: 'data:image/png;base64,AAAA' }),
+      ]),
+      msg('user', [blk({ kind: 'tool_result', toolId: 'call', text: 'standalone tool output' })]),
+      msg('assistant', [blk({ kind: 'thinking', text: 'only reasoning' })]),
+      msg('user', [text('compaction summary')], { metaKind: 'compact' }),
+      msg('user', [text('<system-reminder>The user named this session "new title".</system-reminder>')]),
+      msg('user', [text('[Request interrupted by user]')]),
+      msg('user', [text('<local-command-caveat>protocol noise</local-command-caveat>')]),
+      msg('user', [blk({ kind: 'image', imageUnavailable: true })]),
+    ]
+    const original = structuredClone(messages)
+
+    await exportMarkdown(session(), messages, 'codex')
+    await exportMarkdownToDir(session(), messages, 'codex', '/exports')
+
+    const markdown = writeFileMock.mock.calls[0][1]
+    expect(writeFileMock).toHaveBeenLastCalledWith('/exports/My Session-sess-1.md', markdown)
+    expect(markdown).toContain('2 prompts · 1 replies')
+    expect(markdown).toContain('My prompt')
+    expect(markdown).toContain('[example.txt](/work/example.txt)')
+    expect(markdown).toContain('The answer\n\n```ts\nconst result = 42\n```')
+    expect(markdown).toContain(formatTime(timestamp))
+    expect(markdown.match(/\[Image omitted\]/g)).toHaveLength(3)
+    expect(markdown).not.toMatch(/Image #1|base64|screenshot\.png|tool arguments|tool output|reasoning|compaction summary|new title|interrupted|protocol noise/)
+    expect(readFileBase64Mock).not.toHaveBeenCalled()
+    expect(messages).toEqual(original)
+  })
+
+  it('keeps complete HTML and JSON exports when compact Markdown is enabled', async () => {
+    setExportCompactMarkdown(true)
+    saveMock.mockResolvedValue('/exports/session')
+    const messages = [msg('assistant', [blk({ kind: 'thinking', text: 'reasoning to keep' })])]
+
+    await exportHtml(session(), messages, 'codex')
+    await exportJson(session(), messages, 'codex')
+
+    expect(writeFileMock.mock.calls[0][1]).toContain('reasoning to keep')
+    expect(JSON.parse(writeFileMock.mock.calls[1][1]).messages).toEqual(messages)
   })
 
   it('inlines a local-path image into the html export', async () => {

@@ -70,6 +70,7 @@ import {
   setBackgroundImagePath,
   setChatSpacing,
   setChatRailCount,
+  setExportCompactMarkdown,
   setLang,
   setShowToolCalls,
   setShowChatRail,
@@ -263,6 +264,7 @@ beforeEach(() => {
   runtimeDiagnosticsMock.mockReset().mockResolvedValue(diagnosticsSample)
 })
 afterEach(() => {
+  setExportCompactMarkdown(false)
   setLang('en')
   setTheme('system')
   setShowToolCalls(false)
@@ -375,6 +377,21 @@ describe('SettingsModal', () => {
 
     expect(showToolCalls.value).toBe(true)
     expect(localStorage.getItem('showToolCalls:v1')).toBe('1')
+  })
+
+  it('keeps compact Markdown off by default and persists the export switch', async () => {
+    setLang('zh')
+    const wrapper = factory()
+    const toggle = wrapper.get('[role="switch"][aria-label="精简 Markdown 导出"]')
+
+    expect(toggle.element.previousElementSibling?.textContent).toContain('导出显示时间')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(localStorage.getItem('exportCompactMarkdown:v1')).toBe('1')
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    expect(localStorage.getItem('exportCompactMarkdown:v1')).toBe('0')
   })
 
   it('updates information spacing from the Chat slider', async () => {

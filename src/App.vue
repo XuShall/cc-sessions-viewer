@@ -40,6 +40,7 @@ import {
   selectedSessions,
   exitSessionSelectMode,
 } from './sessionsToolbar'
+import { loadSessionPage } from './sessionListLoading'
 import {
   exportMarkdown,
   exportHtml,
@@ -318,6 +319,19 @@ function sessionListOptions() {
   return undefined
 }
 
+function listProjectSessions(dir: string, initialLimit: number, scope = sessionScope(dir)) {
+  const sourceAgent = agent.value
+  const options = sessionListOptions()
+  return loadSessionPage(
+    (limit) => api.listSessions(sourceAgent, dir, 0, limit, options),
+    {
+      initialLimit,
+      needsAll: () => sessionsFilterActive.value,
+      isCurrent: () => sessionScope() === scope,
+    },
+  )
+}
+
 /** 顶栏刷新：重新拉取项目 + 当前列表 + 当前打开的对话，全部静默，不动选中与滚动。 */
 async function refreshAll() {
   if (refreshing.value) return
@@ -343,10 +357,9 @@ async function refreshAll() {
     const n = Math.max(sessions.value.length, PAGE_SIZE)
     const scope = sessionScope()
     tasks.push(
-      api
-        .listSessions(agent.value, activeDir.value, 0, n, sessionListOptions())
+      listProjectSessions(activeDir.value, n, scope)
         .then((page) => {
-          if (sessionScope() !== scope) return
+          if (!page || sessionScope() !== scope) return
           sessions.value = page.sessions
           sessionTotal.value = page.total
         })
@@ -1731,7 +1744,7 @@ async function selectProject(dir: string, opts: { activateTerminal?: boolean } =
     activeDir.value = null
     sessions.value = []
     sessionTotal.value = 0
-    resetSessionsToolbar()
+    resetSessionsToolbar(agent.value)
     return
   }
   showTrash.value = false
@@ -1757,12 +1770,12 @@ async function selectProject(dir: string, opts: { activateTerminal?: boolean } =
   }
   sessions.value = []
   sessionTotal.value = 0
-  resetSessionsToolbar()
+  resetSessionsToolbar(agent.value)
   loadingList.value = true
   const scope = sessionScope(dir)
   try {
-    const page = await api.listSessions(agent.value, dir, 0, PAGE_SIZE, sessionListOptions())
-    if (sessionScope() !== scope) return
+    const page = await listProjectSessions(dir, PAGE_SIZE, scope)
+    if (!page || sessionScope() !== scope) return
     sessions.value = page.sessions
     sessionTotal.value = page.total
   } catch (e) {
@@ -1861,14 +1874,12 @@ async function syncTuiTitlesNow() {
   syncingTuiTitles = true
   const scope = sessionScope()
   try {
-    const page = await api.listSessions(
-      agent.value,
+    const page = await listProjectSessions(
       activeDir.value,
-      0,
       Math.max(PAGE_SIZE, sessions.value.length),
-      sessionListOptions(),
+      scope,
     )
-    if (sessionScope() !== scope) return
+    if (!page || sessionScope() !== scope) return
     sessions.value = page.sessions
     sessionTotal.value = page.total
     syncTuiTabsFromCurrentSessions()
@@ -1935,14 +1946,12 @@ async function refreshSessions() {
   loadingList.value = true
   const scope = sessionScope()
   try {
-    const page = await api.listSessions(
-      agent.value,
+    const page = await listProjectSessions(
       activeDir.value,
-      0,
       Math.max(PAGE_SIZE, sessions.value.length),
-      sessionListOptions(),
+      scope,
     )
-    if (sessionScope() !== scope) return
+    if (!page || sessionScope() !== scope) return
     sessions.value = page.sessions
     sessionTotal.value = page.total
     syncTuiTabsFromCurrentSessions()
@@ -4162,6 +4171,7 @@ onMounted(() => {
     agent.value = nav.agent
     activeDir.value = nav.activeDir
   }
+  resetSessionsToolbar(agent.value)
   // 恢复每个项目各自的 TUI tab 记忆 —— 切到任意项目时恢复它上次活跃的终端 tab。
   for (const v of loadSavedActiveTui()) {
     activeTuiByProject.set(viewKey(v.agent, v.dir), { sessionPath: v.sessionPath, ...(v.isShell ? { isShell: true } : {}) })
@@ -4981,6 +4991,7 @@ provide<PaneActions>(PaneActionsKey, {
         <SessionsTopbar
           v-else-if="activeProject"
           :sessions="visibleSessions"
+          :agent="agent"
         />
         <div v-else class="chat-topbar">
           <button

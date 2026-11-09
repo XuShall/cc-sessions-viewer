@@ -27,6 +27,7 @@ const SHOW_TOOL_CALLS_KEY = 'showToolCalls:v1'
 const SHOW_THINKING_KEY = 'showThinking:v1'
 const EXPORT_SHOW_MESSAGE_TIME_KEY = 'exportShowMessageTime:v1'
 const LEGACY_EXPORT_HTML_SHOW_MESSAGE_TIME_KEY = 'exportHtmlShowMessageTime:v1'
+const EXPORT_COMPACT_MARKDOWN_KEY = 'exportCompactMarkdown:v1'
 const CHAT_SPACING_KEY = 'chatSpacing:v1'
 const SHOW_CHAT_RAIL_KEY = 'showChatRail:v1'
 const CHAT_RAIL_COUNT_KEY = 'chatRailCount:v1'
@@ -113,6 +114,12 @@ export function setExportShowMessageTime(v: boolean) {
 // Backward-compatible aliases for callers using the old HTML-specific name.
 export const exportHtmlShowMessageTime = exportShowMessageTime
 export const setExportHtmlShowMessageTime = setExportShowMessageTime
+
+export const exportCompactMarkdown = ref(localStorage.getItem(EXPORT_COMPACT_MARKDOWN_KEY) === '1')
+export function setExportCompactMarkdown(v: boolean) {
+  exportCompactMarkdown.value = v
+  localStorage.setItem(EXPORT_COMPACT_MARKDOWN_KEY, v ? '1' : '0')
+}
 
 export const showChatRail = ref(localStorage.getItem(SHOW_CHAT_RAIL_KEY) !== '0')
 export function setShowChatRail(v: boolean) {
